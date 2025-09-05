@@ -1,15 +1,14 @@
 import streamlit as st
 
-st.title("DataDesk")
+st.markdown("# 🎫 DataDesk")
+st.markdown("### *A ticket System Created by ADVANTEC*")
 
-col1, col2 = st.columns([2, 1])
+st.markdown("---")
 
-with col1:
-    st.subheader("A ticket System Created by ADVANTEC")
-    st.markdown("""
-    Streamline your support operations with our comprehensive ticket management solution.
-    Built for efficiency, designed for scale.
-    """)
+st.markdown("""
+**DataDesk** is your comprehensive solution for managing support tickets efficiently. 
+Whether you're handling customer inquiries, technical issues, or internal requests, 
+DataDesk provides the tools you need to stay organized and responsive.
 
-with col2:
-    st.info("🚀 **Getting Started**\nCreate your first ticket to begin managing your support workflow.")
+*Get started by creating a new ticket or browsing existing ones.*
+""")
