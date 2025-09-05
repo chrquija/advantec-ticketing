@@ -1,14 +1,18 @@
+
 import streamlit as st
 
-st.markdown("# 🎫 DataDesk")
-st.markdown("### *A ticket System Created by ADVANTEC*")
-
-st.markdown("---")
+st.title("DataDesk")
+st.subheader("A ticket System Created by ADVANTEC")
 
 st.markdown("""
-**DataDesk** is your comprehensive solution for managing support tickets efficiently. 
-Whether you're handling customer inquiries, technical issues, or internal requests, 
-DataDesk provides the tools you need to stay organized and responsive.
+### Welcome to DataDesk
+DataDesk is a comprehensive ticket management system designed to streamline your support operations. 
+Our platform helps you track, manage, and resolve customer inquiries efficiently.
 
-*Get started by creating a new ticket or browsing existing ones.*
+**Key Features:**
+- 🎫 Create and manage support tickets
+- 📊 Track ticket status and progress
+- 👥 Assign tickets to team members
+- 📈 Generate reports and analytics
+- 🔔 Real-time notifications
 """)
