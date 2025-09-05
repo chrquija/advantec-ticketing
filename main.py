@@ -1,15 +1,22 @@
 import streamlit as st
 
 st.title("DataDesk")
+st.subheader("A ticket System Created by ADVANTEC")
 
-col1, col2 = st.columns([2, 1])
+with st.expander("Learn More About DataDesk"):
+    st.write("""
+    DataDesk is your all-in-one solution for managing customer support tickets.
 
-with col1:
-    st.subheader("A ticket System Created by ADVANTEC")
-    st.markdown("""
-    Streamline your support operations with our comprehensive ticket management solution.
-    Built for efficiency, designed for scale.
+    **What you can do:**
+    - Create new support tickets
+    - Track existing tickets
+    - Manage ticket priorities
+    - Generate detailed reports
+    - Collaborate with team members
+
+    **Why choose DataDesk:**
+    - User-friendly interface
+    - Real-time updates
+    - Comprehensive reporting
+    - Scalable architecture
     """)
-
-with col2:
-    st.info("🚀 **Getting Started**\nCreate your first ticket to begin managing your support workflow.")
