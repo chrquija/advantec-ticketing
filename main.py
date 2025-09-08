@@ -14,7 +14,8 @@ with st.expander("Learn More About ATIX"):
     - Receive real-time notifications in Teams when your tickets are approved, updated, or completed. 
 
     **Why choose ATIX?:**
-    - Secure and Reliable: Restricted access to only ADVANTEC employees.
+    - Secure and Reliable: 
+        - Restricted access to only ADVANTEC employees.
     - Professional Data Engineering on demand:
         - AI Consulting and Implementation Services
         - Track Performance with KPI Dashboards
