@@ -1,9 +1,15 @@
-# app.py
-# ATIX — Enterprise Ticketing Solution from ADVANTEC
-# Streamlit MVP with SQLite (default) or any SQLAlchemy-compatible DB via DATABASE_URL.
-# Features: Auth (RBAC), Tickets, Comments, Attachments, Approvals, Projects, Dashboard, Admin, Teams notifications.
-
 import os
+
+# 🔑 New block — supports Streamlit Cloud secrets
+try:
+    import streamlit as st
+    os.environ.update({k: str(v) for k, v in st.secrets.items()})
+except Exception:
+    pass
+
+from dotenv import load_dotenv
+load_dotenv()
+
 import io
 import re
 import uuid
@@ -17,9 +23,7 @@ import datetime as dt
 from typing import Optional, Tuple, List
 
 import pandas as pd
-from dotenv import load_dotenv
 
-import streamlit as st
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
     ForeignKey, func
@@ -29,17 +33,16 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, scoped_
 # ---------------------------
 # 0) ENV + GLOBALS
 # ---------------------------
-load_dotenv()
-
 APP_NAME = "ATIX"
 ORG_NAME = "ADVANTEC"
+
 ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "advantec.com")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///atix.db")
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL", "")  # optional (channel Incoming Webhook)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", f"admin@{ALLOWED_EMAIL_DOMAIN}")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
 ALLOW_SELF_SIGNUP = os.getenv("ALLOW_SELF_SIGNUP", "0") == "1"
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")  # local disk path
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 
 # statuses + priorities
 STATUSES = ["New", "In Progress", "Awaiting Approval", "Approved", "Rejected", "On Hold", "Resolved", "Closed"]
