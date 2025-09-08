@@ -54,9 +54,9 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 STATUSES = ["New", "In Progress", "Awaiting Approval", "Approved", "Rejected", "On Hold", "Resolved", "Closed"]
 
 # New priority scheme
-PRIORITIES = ["P1 - Urgent", "P2 - High", "P3 - Normal"]
+PRIORITIES = ["P1 - Productivity Impacted (SLA: Same Day)", "P2 - Productivity Not Immediately Impacted (SLA: 2-5 Business Days)", "P3 - Priority (SLA: 5+ Business Days)"]
 
-CATEGORIES = ["IT", "Data", "Operations", "Finance", "HR", "Facilities", "Security", "Other"]
+CATEGORIES = ["Civil Engineering", "Data Engineering", "Operations", "Admin/HR", "Other"]
 
 # ---------------------------
 # 1) DB SETUP (SQLAlchemy)
@@ -102,7 +102,7 @@ class Ticket(Base):
     description = Column(Text, nullable=False)
 
     status = Column(String(50), default="New")
-    priority = Column(String(20), default="P3 - Normal")
+    priority = Column(String(100), default="P2 - Productivity Not Immediately Impacted (SLA: 2-5 Business Days)")
     category = Column(String(100), default="Other")
 
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -126,6 +126,7 @@ class Ticket(Base):
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])
     approved_by = relationship("User", foreign_keys=[approved_by_id])
     project = relationship("Project")
+
 
 class Comment(Base):
     __tablename__ = "comments"
@@ -227,10 +228,14 @@ def add_history(db, ticket_id: int, actor_id: int, action: str, from_status: Opt
 def migrate_priorities(db):
     """Map any legacy priorities to the new P1/P2/P3 scheme."""
     legacy_to_new = {
-        "Urgent": "P1 - Urgent",
-        "High": "P2 - High",
-        "Medium": "P3 - Normal",
-        "Low": "P3 - Normal",
+        "Urgent": "P1 - Productivity Impacted (SLA: Same Day)",
+        "High": "P2 - Productivity Not Immediately Impacted (SLA: 2-5 Business Days)",
+        "Medium": "P3 - Priority (SLA: 5+ Business Days)",
+        "Low": "P3 - Priority (SLA: 5+ Business Days)",
+        # Also handle any old P1/P2/P3 formats that might exist
+        "P1 - Urgent": "P1 - Productivity Impacted (SLA: Same Day)",
+        "P2 - High": "P2 - Productivity Not Immediately Impacted (SLA: 2-5 Business Days)",
+        "P3 - Normal": "P3 - Priority (SLA: 5+ Business Days)",
     }
     updated = 0
     for legacy, newv in legacy_to_new.items():
@@ -240,6 +245,7 @@ def migrate_priorities(db):
         )
     if updated:
         db.commit()
+
 
 def init_db():
     Base.metadata.create_all(bind=engine)
