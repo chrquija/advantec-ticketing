@@ -1471,7 +1471,7 @@ def help_view():
 - **Assignments:** You can assign tickets on creation and from the **Update Ticket** tab. The assignee receives an email notification.
 - **Statuses:** *New → In Progress → Resolved → Closed.* Approval adds *Awaiting Approval/Approved/Rejected.*
 - **Approvals:** Project Managers see **Approvals** for tickets that requested project charges.
-- **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**).
+- **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**). FEATURE COMING SOON 
 - **Security:** Access is restricted to *@{ALLOWED_EMAIL_DOMAIN}* emails. Admins can manage accounts and projects.
 - **Users:** Admins now **Deactivate/Reactivate** users instead of deleting to preserve history.
 - **Archiving:** Admins can **Archive/Unarchive tickets** from the ticket detail page. Archived tickets are read-only and hidden from lists by default.
