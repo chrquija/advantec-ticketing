@@ -25,3 +25,10 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+
+# secrets & local state
+.env
+*.db
+uploads/
+__pycache__/
+*.pyc
