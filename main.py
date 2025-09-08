@@ -149,7 +149,7 @@ class Ticket(Base):
     teams_thread_url = Column(String(500), nullable=True)
     attachments_count = Column(Integer, default=0)
 
-    # NEW: archive flag
+    # Archive flag
     is_archived = Column(Boolean, default=False, index=True)
 
     created_by = relationship("User", foreign_keys=[created_by_id])
@@ -296,12 +296,46 @@ def notify_assignment_email(ticket: Ticket, assigned_to: User, assigned_by: User
       <li><b>Project:</b> {ticket.project.name if ticket.project else '—'}</li>
     </ul>
     <p><b>Description</b>:<br>{ticket.description[:2000].replace('\n','<br>')}</p>
-    <p>Open ATIX: <a href="{url_hint}">{url_hint or '(set APP_BASE_URL to include a link)'}</a></p>
+    <p>Open ATIX: <a href="{APP_BASE_URL}">{APP_BASE_URL or '(set APP_BASE_URL to include a link)'}</a></p>
     <p>— ATIX</p>
     """
     ok, msg = send_email(assigned_to.email, subject, text_body, html)
     if not ok and assigned_by and assigned_by.role == "admin":
         st.toast(f"Email not sent: {msg}", icon="⚠️")
+    return ok, msg
+
+def send_pm_approval_request_email(db, ticket: Ticket, requested_by: User):
+    """Email the Project Manager that an approval was requested."""
+    # Guardrails
+    if not (ticket and ticket.request_project_charge and ticket.project and ticket.project.manager_id):
+        return False, "No PM or approval not requested"
+    pm = db.query(User).get(ticket.project.manager_id)
+    if not (pm and pm.email):
+        return False, "PM has no email"
+    url_hint = APP_BASE_URL or ""
+    subject = f"[ATIX] Approval requested for {ticket.short_id}"
+    text = (
+        f"Hi {pm.name},\n\n"
+        f"{requested_by.name} requested project charge approval on:\n"
+        f"Ticket: {ticket.short_id}\nTitle: {ticket.title}\nProject: {ticket.project.name}\n"
+        f"Priority: {ticket.priority}\nStatus: {ticket.status}\n\n"
+        f"Open ticket: {url_hint}\n\n"
+        f"- ATIX"
+    )
+    html = f"""
+    <p>Hi {pm.name},</p>
+    <p><b>{requested_by.name}</b> requested project charge approval on:</p>
+    <ul>
+      <li><b>Ticket:</b> {ticket.short_id}</li>
+      <li><b>Title:</b> {ticket.title}</li>
+      <li><b>Project:</b> {ticket.project.name}</li>
+      <li><b>Priority:</b> {ticket.priority}</li>
+      <li><b>Status:</b> {ticket.status}</li>
+    </ul>
+    <p>Open ticket: <a href="{APP_BASE_URL}">{APP_BASE_URL or '(set APP_BASE_URL to include a link)'}</a></p>
+    <p>— ATIX</p>
+    """
+    ok, msg = send_email(pm.email, subject, text, html)
     return ok, msg
 
 def add_history(db, ticket_id: int, actor_id: int, action: str, from_status: Optional[str] = None,
@@ -696,6 +730,10 @@ def create_ticket_view():
                     assigned_to = next((u for u in users if u.id == assigned_to_id), None)
                     notify_assignment_email(t, assigned_to, user)
 
+                # >>> NEW: Email the Project Manager immediately when approval is requested
+                if t.request_project_charge and t.project and t.project.manager_id:
+                    send_pm_approval_request_email(db, t, user)
+
                 st.success(f"Ticket **{t.short_id}** created.")
                 st.session_state["last_created_ticket"] = t.short_id
 
@@ -1014,6 +1052,7 @@ def ticket_detail_view(ticket_id: int):
                         else:
                             prev_status = t.status
                             prev_assigned_id = t.assigned_to_id
+                            prev_project_id = t.project_id
 
                             t.status = status
                             t.priority = priority
@@ -1042,6 +1081,15 @@ def ticket_detail_view(ticket_id: int):
                                 new_assignee = db.query(User).get(t.assigned_to_id)
                                 notify_assignment_email(t, new_assignee, user)
 
+                            # >>> NEW triggers to PM:
+                            # 1) Status moved to Awaiting Approval
+                            if t.request_project_charge and t.status == "Awaiting Approval" and t.project and t.project.manager_id:
+                                send_pm_approval_request_email(db, t, user)
+                            # 2) Project changed and now has a PM (and the request is pending)
+                            elif (t.request_project_charge and t.approval_status == "Pending" and
+                                  prev_project_id != t.project_id and t.project and t.project.manager_id):
+                                send_pm_approval_request_email(db, t, user)
+
                             send_teams_notification(
                                 f"Ticket {t.short_id} updated",
                                 f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
@@ -1059,6 +1107,17 @@ def ticket_detail_view(ticket_id: int):
                     st.write(f"**Approved by:** {t.approved_by.name}")
                 if t.approval_note:
                     st.write(f"**Note:** {t.approval_note}")
+
+                # >>> NEW: Resend approval email (when pending, not archived)
+                can_resend = (t.approval_status == "Pending") and (not t.is_archived)
+                can_click = is_pm or (user.id in [t.created_by_id]) or (effective_role() == "admin")
+                if can_resend and can_click:
+                    if st.button("📧 Resend approval email to PM"):
+                        ok, msg = send_pm_approval_request_email(db, t, user)
+                        if ok:
+                            st.success("Email sent to Project Manager.")
+                        else:
+                            st.warning(f"Email not sent: {msg}")
 
                 if not t.is_archived and is_pm and t.approval_status in ["Pending", "Rejected"]:
                     colap1, colap2 = st.columns(2)
@@ -1471,10 +1530,11 @@ def help_view():
 - **Assignments:** You can assign tickets on creation and from the **Update Ticket** tab. The assignee receives an email notification.
 - **Statuses:** *New → In Progress → Resolved → Closed.* Approval adds *Awaiting Approval/Approved/Rejected.*
 - **Approvals:** Project Managers see **Approvals** for tickets that requested project charges.
-- **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**). FEATURE COMING SOON 
+- **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**).
 - **Security:** Access is restricted to *@{ALLOWED_EMAIL_DOMAIN}* emails. Admins can manage accounts and projects.
-- **Users:** Admins now **Deactivate/Reactivate** users instead of deleting to preserve history.
+- **Users:** Admins **Deactivate/Reactivate** users instead of deleting to preserve history.
 - **Archiving:** Admins can **Archive/Unarchive tickets** from the ticket detail page. Archived tickets are read-only and hidden from lists by default.
+- **Approval Emails:** PMs are emailed automatically when approval is requested, and you can resend from the Approval tab while Pending.
 """)
 
 # ---------------------------
