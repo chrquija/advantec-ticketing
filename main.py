@@ -5,7 +5,7 @@ st.subheader("Enterprise Ticketing Solution from ADVANTEC")
 
 with st.expander("Learn More About aTicket"):
     st.write("""
-    DataDesk is your all-in-one solution for managing service requests.
+    aTicket is your all-in-one solution for managing service requests.
 
     **What you can do:**
     - Create, assign, and track **support tickets** within the ENTIRE ADVANTEC network.
