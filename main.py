@@ -1,7 +1,7 @@
 import streamlit as st
 
 st.title("ATicket")
-st.subheader("Enterprise TIcketing Solution from ADVANTEC")
+st.subheader("Enterprise Ticketing Solution from ADVANTEC")
 
 with st.expander("Learn More About DataDesk"):
     st.write("""
