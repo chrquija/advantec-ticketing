@@ -21,7 +21,10 @@ import hashlib
 import requests
 import datetime as dt
 from typing import Optional, Tuple, List
-from urllib.parse import quote  # NEW: for mailto/Outlook compose links
+
+# email
+import smtplib
+from email.message import EmailMessage
 
 import pandas as pd
 from sqlalchemy import (
@@ -47,8 +50,17 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
 ALLOW_SELF_SIGNUP = os.getenv("ALLOW_SELF_SIGNUP", "1") == "1"
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 
-# For links included in email bodies (not required for mailto to work, but helpful)
+# Email (SMTP) config
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USERNAME or f"no-reply@{ALLOWED_EMAIL_DOMAIN}")
+SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "1") == "1"
 APP_BASE_URL = os.getenv("APP_BASE_URL", "")
+
+def email_configured() -> bool:
+    return bool(SMTP_HOST and SMTP_FROM)
 
 # statuses + priorities
 STATUSES = ["New", "In Progress", "Awaiting Approval", "Approved", "Rejected", "On Hold", "Resolved", "Closed"]
@@ -184,7 +196,7 @@ class History(Base):
     actor = relationship("User")
 
 # ---------------------------
-# 3) UTIL: SECURITY, TEAMS, IDs, MAILTO
+# 3) UTIL: SECURITY, TEAMS, EMAIL, IDs
 # ---------------------------
 def ensure_dirs():
     if not os.path.exists(UPLOAD_DIR):
@@ -231,23 +243,107 @@ def send_teams_notification(title: str, text: str, webhook: Optional[str] = None
     except Exception as e:
         return False, str(e)
 
-# --- Email compose link helpers (no SMTP required) ---
-def build_mailto_link(to_addr: str, subject: str, body: str) -> str:
-    """
-    Returns a mailto: URL with subject/body URL-encoded.
-    Note: Some clients enforce URL length limits; we truncate body safely.
-    """
-    max_len = 1800  # conservative for broad compatibility
-    body_safe = body if len(body) <= max_len else (body[:max_len - 20] + "\n...\n(Body truncated)")
-    return f"mailto:{quote(to_addr)}?subject={quote(subject)}&body={quote(body_safe)}"
+def send_email(to_addr: str, subject: str, text_body: str, html_body: Optional[str] = None) -> Tuple[bool, str]:
+    if not email_configured():
+        return False, "Email not configured"
+    try:
+        msg = EmailMessage()
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_addr
+        msg["Subject"] = subject
+        msg.set_content(text_body)
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
 
-def build_outlook_web_compose_link(to_addr: str, subject: str, body: str) -> str:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+            if SMTP_STARTTLS:
+                s.starttls()
+            if SMTP_USERNAME and SMTP_PASSWORD:
+                s.login(SMTP_USERNAME, SMTP_PASSWORD)
+            s.send_message(msg)
+        return True, "sent"
+    except Exception as e:
+        return False, str(e)
+
+def notify_assignment_email(ticket: Ticket, assigned_to: User, assigned_by: User):
+    """Email the assignee when a ticket is assigned to them."""
+    if not assigned_to or not assigned_to.email:
+        return False, "No recipient"
+    url_hint = APP_BASE_URL or ""
+    subject = f"[ATIX] {ticket.short_id} assigned to you"
+    due_line = f"\nDue: {ticket.due_at.strftime('%Y-%m-%d %H:%M UTC')}" if ticket.due_at else ""
+    text_body = (
+        f"Hi {assigned_to.name},\n\n"
+        f"The following ticket has been assigned to you by {assigned_by.name}:\n"
+        f"Ticket: {ticket.short_id}\n"
+        f"Title: {ticket.title}\n"
+        f"Priority: {ticket.priority}\n"
+        f"Status: {ticket.status}{due_line}\n"
+        f"Project: {ticket.project.name if ticket.project else '—'}\n\n"
+        f"Description:\n{ticket.description[:1000]}\n\n"
+        f"Open ATIX: {url_hint}\n"
+        f"- ATIX"
+    )
+    html = f"""
+    <p>Hi {assigned_to.name},</p>
+    <p>The following ticket has been assigned to you by <b>{assigned_by.name}</b>:</p>
+    <ul>
+      <li><b>Ticket:</b> {ticket.short_id}</li>
+      <li><b>Title:</b> {ticket.title}</li>
+      <li><b>Priority:</b> {ticket.priority}</li>
+      <li><b>Status:</b> {ticket.status}</li>
+      <li><b>Due:</b> {ticket.due_at.strftime('%Y-%m-%d %H:%M UTC') if ticket.due_at else '—'}</li>
+      <li><b>Project:</b> {ticket.project.name if ticket.project else '—'}</li>
+    </ul>
+    <p><b>Description</b>:<br>{ticket.description[:2000].replace('\n','<br>')}</p>
+    <p>Open ATIX: <a href="{APP_BASE_URL}">{APP_BASE_URL or '(set APP_BASE_URL to include a link)'}</a></p>
+    <p>— ATIX</p>
     """
-    Outlook on the web deep-link. Works for M365 users signed in in the browser.
-    Attachments cannot be auto-added (browser restriction).
+    ok, msg = send_email(assigned_to.email, subject, text_body, html)
+    if not ok and assigned_by and assigned_by.role == "admin":
+        st.toast(f"Email not sent: {msg}", icon="⚠️")
+    return ok, msg
+
+def send_pm_approval_request_email(db, ticket: Ticket, requested_by: User):
+    """Email the Project Manager that an approval was requested."""
+    # Guardrails
+    if not (ticket and ticket.request_project_charge and ticket.project and ticket.project.manager_id):
+        return False, "No PM or approval not requested"
+    pm = db.query(User).get(ticket.project.manager_id)
+    if not (pm and pm.email):
+        return False, "PM has no email"
+    url_hint = APP_BASE_URL or ""
+    subject = f"[ATIX] Approval requested for {ticket.short_id}"
+    text = (
+        f"Hi {pm.name},\n\n"
+        f"{requested_by.name} requested project charge approval on:\n"
+        f"Ticket: {ticket.short_id}\nTitle: {ticket.title}\nProject: {ticket.project.name}\n"
+        f"Priority: {ticket.priority}\nStatus: {ticket.status}\n\n"
+        f"Open ticket: {url_hint}\n\n"
+        f"- ATIX"
+    )
+    html = f"""
+    <p>Hi {pm.name},</p>
+    <p><b>{requested_by.name}</b> requested project charge approval on:</p>
+    <ul>
+      <li><b>Ticket:</b> {ticket.short_id}</li>
+      <li><b>Title:</b> {ticket.title}</li>
+      <li><b>Project:</b> {ticket.project.name}</li>
+      <li><b>Priority:</b> {ticket.priority}</li>
+      <li><b>Status:</b> {ticket.status}</li>
+    </ul>
+    <p>Open ticket: <a href="{APP_BASE_URL}">{APP_BASE_URL or '(set APP_BASE_URL to include a link)'}</a></p>
+    <p>— ATIX</p>
     """
-    base = "https://outlook.office.com/mail/deeplink/compose"
-    return f"{base}?to={quote(to_addr)}&subject={quote(subject)}&body={quote(body)}"
+    ok, msg = send_email(pm.email, subject, text, html)
+    return ok, msg
+
+def add_history(db, ticket_id: int, actor_id: int, action: str, from_status: Optional[str] = None,
+                to_status: Optional[str] = None, note: Optional[str] = None):
+    h = History(ticket_id=ticket_id, actor_id=actor_id, action=action,
+                from_status=from_status, to_status=to_status, note=note)
+    db.add(h)
+    db.commit()
 
 # ---------------------------
 # 4) DB INIT + MIGRATIONS
@@ -342,7 +438,7 @@ with st.expander("Learn More About ATIX"):
     - Create, assign, and track **support tickets** within the ENTIRE ADVANTEC network.
     - Attach files, screenshots, and other information to each ticket.
     - Submit work requests and charge them to a project **upon approval from Project Manager.**
-    - Receive notifications in Microsoft Teams for key events.
+    - Receive notifications in Microsoft Teams and email for key events.
 
     **Why choose ATIX?:**
     - Secure and Reliable: Restricted access to only ADVANTEC employees.
@@ -622,82 +718,24 @@ def create_ticket_view():
 
                 add_history(db, t.id, user.id, "created", to_status=t.status)
 
-                # Teams notification
+                # Notify Teams
                 title_msg = f"New Ticket {t.short_id}: {t.title}"
                 text_msg = f"Priority: {t.priority}\nStatus: {t.status}\nCreated by: {user.name}\nProject: {project_choice}"
-                ok, _ = send_teams_notification(title_msg, text_msg)
+                ok, msg = send_teams_notification(title_msg, text_msg)
                 if ok:
                     st.toast("Teams notification sent.", icon="✅")
 
+                # Email assignee (if any and not the creator)
+                if assigned_to_id and assigned_to_id != user.id:
+                    assigned_to = next((u for u in users if u.id == assigned_to_id), None)
+                    notify_assignment_email(t, assigned_to, user)
+
+                # >>> NEW: Email the Project Manager immediately when approval is requested
+                if t.request_project_charge and t.project and t.project.manager_id:
+                    send_pm_approval_request_email(db, t, user)
+
                 st.success(f"Ticket **{t.short_id}** created.")
                 st.session_state["last_created_ticket"] = t.short_id
-
-                # -------- Compose email convenience buttons (no SMTP required) --------
-                # Build a formatted list of uploaded file names (for manual attaching)
-                attachment_lines = []
-                if files:
-                    for f in files:
-                        try:
-                            kb = len(f.getbuffer()) / 1024
-                        except Exception:
-                            kb = 0.0
-                        attachment_lines.append(f"- {f.name} ({kb:.1f} KB)")
-                attachments_text = "\n".join(attachment_lines) if attachment_lines else "(none)"
-                storage_hint = os.path.join(UPLOAD_DIR, t.short_id)
-
-                # common body
-                email_body = (
-                    f"Ticket: {t.short_id}\n"
-                    f"Title: {t.title}\n"
-                    f"Project: {t.project.name if t.project else '—'}\n"
-                    f"Priority: {t.priority}\n"
-                    f"Status: {t.status}\n"
-                    f"Due: {t.due_at.strftime('%Y-%m-%d %H:%M UTC') if t.due_at else '—'}\n"
-                    f"\n"
-                    f"Description:\n{t.description}\n"
-                    f"\n"
-                    f"Attachments to add (attach manually):\n{attachments_text}\n"
-                    f"\n"
-                    f"ATIX link: {APP_BASE_URL or '(set APP_BASE_URL)'}\n"
-                    f"Storage (server): {storage_hint}"
-                )
-
-                # Assignee compose
-                assignee_obj = db.query(User).get(assigned_to_id) if assigned_to_id else None
-                if assignee_obj and assignee_obj.email:
-                    subject = f"[ATIX] {t.short_id} — {t.title}"
-                    mailto_url = build_mailto_link(assignee_obj.email, subject, email_body)
-                    outlook_url = build_outlook_web_compose_link(assignee_obj.email, subject, email_body)
-                    st.info("Want to email the assignee via your mail app?")
-                    colm1, colm2 = st.columns(2)
-                    with colm1:
-                        st.link_button("✉️ Compose in default mail app", mailto_url, use_container_width=True)
-                    with colm2:
-                        st.link_button("📧 Compose in Outlook on the web", outlook_url, use_container_width=True)
-
-                # PM compose (when approval requested)
-                if t.request_project_charge and t.project and t.project.manager_id:
-                    pm = db.query(User).get(t.project.manager_id)
-                    if pm and pm.email:
-                        pm_body = (
-                            f"{user.name} requested project charge approval.\n\n"
-                            f"Ticket: {t.short_id}\n"
-                            f"Title: {t.title}\n"
-                            f"Project: {t.project.name}\n"
-                            f"Priority: {t.priority}\n"
-                            f"Status: {t.status}\n\n"
-                            f"Description:\n{t.description}\n\n"
-                            f"ATIX link: {APP_BASE_URL or '(set APP_BASE_URL)'}"
-                        )
-                        pm_subject = f"[ATIX] Approval requested: {t.short_id}"
-                        pm_mailto = build_mailto_link(pm.email, pm_subject, pm_body)
-                        pm_outlook = build_outlook_web_compose_link(pm.email, pm_subject, pm_body)
-                        st.caption("Notify the Project Manager:")
-                        colp1, colp2 = st.columns(2)
-                        with colp1:
-                            st.link_button("✉️ Email PM (mail app)", pm_mailto, use_container_width=True)
-                        with colp2:
-                            st.link_button("📧 Email PM (Outlook web)", pm_outlook, use_container_width=True)
 
 # ---------------------------
 # 11) TICKETS — LIST + DETAIL
@@ -1038,84 +1076,26 @@ def ticket_detail_view(ticket_id: int):
 
                             add_history(db, t.id, user.id, "update", from_status=prev_status, to_status=t.status, note=note or "")
 
-                            # Build attachment summary from DB for email bodies
-                            atts = db.query(Attachment).filter(Attachment.ticket_id == t.id).order_by(Attachment.uploaded_at.asc()).all()
-                            att_lines = [f"- {a.file_name} ({(a.file_size or 0)/1024:.1f} KB)" for a in atts] if atts else []
-                            att_text = "\n".join(att_lines) if att_lines else "(none)"
-
-                            # Email body template
-                            common_body = (
-                                f"Ticket: {t.short_id}\n"
-                                f"Title: {t.title}\n"
-                                f"Project: {t.project.name if t.project else '—'}\n"
-                                f"Priority: {t.priority}\n"
-                                f"Status: {t.status}\n"
-                                f"Due: {t.due_at.strftime('%Y-%m-%d %H:%M UTC') if t.due_at else '—'}\n"
-                                f"\nDescription:\n{t.description}\n"
-                                f"\nAttachments to add (attach manually):\n{att_text}\n"
-                                f"\nATIX link: {APP_BASE_URL or '(set APP_BASE_URL)'}"
-                            )
-
-                            # 1) If assignment changed -> show compose buttons to email the new assignee
+                            # If assignment changed -> email assignee
                             if t.assigned_to_id and t.assigned_to_id != prev_assigned_id:
                                 new_assignee = db.query(User).get(t.assigned_to_id)
-                                if new_assignee and new_assignee.email:
-                                    subj = f"[ATIX] {t.short_id} — {t.title}"
-                                    mailto_url = build_mailto_link(new_assignee.email, subj, common_body)
-                                    outlook_url = build_outlook_web_compose_link(new_assignee.email, subj, common_body)
-                                    st.success("Assignment updated.")
-                                    st.info("Send an email to the new assignee:")
-                                    c1, c2 = st.columns(2)
-                                    with c1:
-                                        st.link_button("✉️ Compose in mail app", mailto_url, use_container_width=True)
-                                    with c2:
-                                        st.link_button("📧 Compose in Outlook web", outlook_url, use_container_width=True)
+                                notify_assignment_email(t, new_assignee, user)
 
-                            # 2) PM compose triggers:
-                            # a) Status moved to Awaiting Approval and project has a PM
-                            pm = None
-                            if t.project and t.project.manager_id:
-                                pm = db.query(User).get(t.project.manager_id)
-                            if (t.request_project_charge and t.status == "Awaiting Approval" and pm and pm.email):
-                                pm_body = (
-                                    f"{user.name} requested project charge approval.\n\n"
-                                    f"{common_body}"
-                                )
-                                pm_subj = f"[ATIX] Approval requested: {t.short_id}"
-                                pm_mailto = build_mailto_link(pm.email, pm_subj, pm_body)
-                                pm_outlook = build_outlook_web_compose_link(pm.email, pm_subj, pm_body)
-                                st.info("Notify the Project Manager:")
-                                p1, p2 = st.columns(2)
-                                with p1:
-                                    st.link_button("✉️ Email PM (mail app)", pm_mailto, use_container_width=True)
-                                with p2:
-                                    st.link_button("📧 Email PM (Outlook web)", pm_outlook, use_container_width=True)
-                            # b) Project changed and request is still Pending and new project has a PM
+                            # >>> NEW triggers to PM:
+                            # 1) Status moved to Awaiting Approval
+                            if t.request_project_charge and t.status == "Awaiting Approval" and t.project and t.project.manager_id:
+                                send_pm_approval_request_email(db, t, user)
+                            # 2) Project changed and now has a PM (and the request is pending)
                             elif (t.request_project_charge and t.approval_status == "Pending" and
-                                  prev_project_id != t.project_id and pm and pm.email):
-                                pm_body = (
-                                    f"{user.name} requested project charge approval (project updated).\n\n"
-                                    f"{common_body}"
-                                )
-                                pm_subj = f"[ATIX] Approval requested: {t.short_id}"
-                                pm_mailto = build_mailto_link(pm.email, pm_subj, pm_body)
-                                pm_outlook = build_outlook_web_compose_link(pm.email, pm_subj, pm_body)
-                                st.info("Notify the Project Manager (project changed):")
-                                p1, p2 = st.columns(2)
-                                with p1:
-                                    st.link_button("✉️ Email PM (mail app)", pm_mailto, use_container_width=True)
-                                with p2:
-                                    st.link_button("📧 Email PM (Outlook web)", pm_outlook, use_container_width=True)
+                                  prev_project_id != t.project_id and t.project and t.project.manager_id):
+                                send_pm_approval_request_email(db, t, user)
 
-                            # Teams notification about update
                             send_teams_notification(
                                 f"Ticket {t.short_id} updated",
                                 f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
                             )
-
-                            # Offer a manual refresh so the user can click email first
-                            if st.button("🔄 Refresh ticket view"):
-                                st.rerun()
+                            st.success("Changes saved.")
+                            st.rerun()
 
         # Approval Tab (conditional)
         approval_tab = tab3 if t.request_project_charge and t.project and t.project.manager_id else None
@@ -1128,26 +1108,16 @@ def ticket_detail_view(ticket_id: int):
                 if t.approval_note:
                     st.write(f"**Note:** {t.approval_note}")
 
-                # Show compose buttons (instead of SMTP resend) when Pending & not archived
-                if t.approval_status == "Pending" and not t.is_archived:
-                    pm = db.query(User).get(t.project.manager_id)
-                    if pm and pm.email:
-                        body = (
-                            f"{current_user().name} requested project charge approval.\n\n"
-                            f"Ticket: {t.short_id}\nTitle: {t.title}\nProject: {t.project.name}\n"
-                            f"Priority: {t.priority}\nStatus: {t.status}\n\n"
-                            f"Description:\n{t.description}\n\n"
-                            f"ATIX link: {APP_BASE_URL or '(set APP_BASE_URL)'}"
-                        )
-                        subj = f"[ATIX] Approval requested: {t.short_id}"
-                        mailto_url = build_mailto_link(pm.email, subj, body)
-                        outlook_url = build_outlook_web_compose_link(pm.email, subj, body)
-                        st.caption("Email the Project Manager:")
-                        r1, r2 = st.columns(2)
-                        with r1:
-                            st.link_button("✉️ Email PM (mail app)", mailto_url, use_container_width=True)
-                        with r2:
-                            st.link_button("📧 Email PM (Outlook web)", outlook_url, use_container_width=True)
+                # >>> NEW: Resend approval email (when pending, not archived)
+                can_resend = (t.approval_status == "Pending") and (not t.is_archived)
+                can_click = is_pm or (user.id in [t.created_by_id]) or (effective_role() == "admin")
+                if can_resend and can_click:
+                    if st.button("📧 Resend approval email to PM"):
+                        ok, msg = send_pm_approval_request_email(db, t, user)
+                        if ok:
+                            st.success("Email sent to Project Manager.")
+                        else:
+                            st.warning(f"Email not sent: {msg}")
 
                 if not t.is_archived and is_pm and t.approval_status in ["Pending", "Rejected"]:
                     colap1, colap2 = st.columns(2)
@@ -1517,11 +1487,23 @@ def admin_view():
             "UPLOAD_DIR": UPLOAD_DIR,
             "TEAMS_WEBHOOK_URL": "configured" if TEAMS_WEBHOOK_URL else "(not set)",
             "ALLOW_SELF_SIGNUP": ALLOW_SELF_SIGNUP,
-            "APP_BASE_URL": APP_BASE_URL or "(not set)",
+            "EMAIL_SMTP": "configured" if email_configured() else "(not set)",
+            "APP_BASE_URL": APP_BASE_URL or "(not set)"
         })
+
+        # Test email functionality
+        st.markdown("#### Test Email")
+        if st.button("Send test email to ADMIN_EMAIL"):
+            ok, msg = send_email(ADMIN_EMAIL, "[ATIX] SMTP test", "If you see this, SMTP works.")
+            if ok:
+                st.success(f"✅ Email sent successfully: {msg}")
+            else:
+                st.error(f"❌ Email failed: {msg}")
+
         if st.button("Rebuild DB metadata (safe)"):
             Base.metadata.create_all(bind=engine)
             st.success("Schema ensured.")
+
 
 # ---------------------------
 # 16) SETTINGS / PROFILE
@@ -1558,13 +1540,14 @@ def help_view():
     st.header("Help")
     st.markdown(f"""
 - **Creating Tickets:** Use **Create Ticket** to submit requests. Attach files/screenshots as needed.
-- **Assignments:** After submission (or reassignment), use the **Compose email** buttons to email the assignee via your mail app (Outlook, Apple Mail, etc.).
-- **Approvals:** When a ticket requests project charge approval, the **Approval** tab shows **Compose email** buttons to notify the Project Manager.
-- **Statuses:** *New → In Progress → Resolved → Closed.* Approval adds *Awaiting Approval / Approved / Rejected.*
-- **Teams Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) for notifications.
+- **Assignments:** You can assign tickets on creation and from the **Update Ticket** tab. The assignee receives an email notification.
+- **Statuses:** *New → In Progress → Resolved → Closed.* Approval adds *Awaiting Approval/Approved/Rejected.*
+- **Approvals:** Project Managers see **Approvals** for tickets that requested project charges.
+- **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**).
 - **Security:** Access is restricted to *@{ALLOWED_EMAIL_DOMAIN}* emails. Admins can manage accounts and projects.
 - **Users:** Admins **Deactivate/Reactivate** users instead of deleting to preserve history.
 - **Archiving:** Admins can **Archive/Unarchive tickets** from the ticket detail page. Archived tickets are read-only and hidden from lists by default.
+- **Approval Emails:** PMs are emailed automatically when approval is requested, and you can resend from the Approval tab while Pending.
 """)
 
 # ---------------------------
