@@ -1240,6 +1240,13 @@ def dashboard_view():
 def admin_view():
     require_login()
     require_role("admin")
+
+    # Clear any stale session states that might cause issues
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith("confirm_delete_")]
+    if len(keys_to_clear) > 10:  # If too many confirmation states, clear them
+        for k in keys_to_clear:
+            del st.session_state[k]
+
     st.header("Admin")
 
     tab1, tab2 = st.tabs(["Users", "System"])
