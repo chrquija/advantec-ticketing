@@ -1,11 +1,11 @@
 import streamlit as st
 
-st.title("aTicket")
+st.title("A-Ticket")
 st.subheader("Enterprise Ticketing Solution from ADVANTEC")
 
-with st.expander("Learn More About aTicket"):
+with st.expander("Learn More About A-Ticket"):
     st.write("""
-    aTicket is your all-in-one solution for managing service requests.
+    A-Ticket is your all-in-one solution for managing service requests.
 
     **What you can do:**
     - Create, assign, and track **support tickets** within the ENTIRE ADVANTEC network.
