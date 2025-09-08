@@ -9,10 +9,8 @@ from email.message import EmailMessage
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
 from sqlalchemy.orm import sessionmaker
 
-# Import shared database setup (CHANGED: was "from main import...")
+# Import shared database setup
 from database import Base, engine, utcnow, valid_org_email, hash_password
-
-# ... rest of your existing code stays exactly the same ...
 
 # ---------------------------
 # 2FA CONFIGURATION
@@ -30,7 +28,6 @@ ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "advantec-usa.com")
 # Verification code settings
 CODE_LENGTH = 5
 CODE_EXPIRY_MINUTES = 15  # How long codes are valid
-
 
 # ---------------------------
 # DATABASE MODEL
@@ -50,7 +47,6 @@ class EmailVerification(Base):
     is_verified = Column(Boolean, default=False)
     attempts = Column(Integer, default=0)  # Track failed verification attempts
 
-
 # ---------------------------
 # HELPER FUNCTIONS
 # ---------------------------
@@ -58,7 +54,6 @@ class EmailVerification(Base):
 def generate_verification_code() -> str:
     """Generate a random 5-digit verification code"""
     return ''.join([str(random.randint(0, 9)) for _ in range(CODE_LENGTH)])
-
 
 def send_verification_email(email: str, code: str, name: str) -> Tuple[bool, str]:
     """Send verification code via email"""
@@ -124,7 +119,6 @@ ADVANTEC
     except Exception as e:
         return False, f"Email failed: {str(e)}"
 
-
 def create_verification_request(email: str, name: str, password: str) -> Tuple[bool, str, str]:
     """Create a new verification request"""
 
@@ -178,7 +172,6 @@ def create_verification_request(email: str, name: str, password: str) -> Tuple[b
         return False, f"Database error: {str(e)}", ""
     finally:
         session.close()
-
 
 def verify_code_and_create_account(email: str, entered_code: str) -> Tuple[bool, str]:
     """Verify the code and create the user account if valid"""
@@ -244,7 +237,6 @@ def verify_code_and_create_account(email: str, entered_code: str) -> Tuple[bool,
     finally:
         session.close()
 
-
 def cleanup_expired_verifications():
     """Clean up expired verification requests (run periodically)"""
     Session = sessionmaker(bind=engine)
@@ -261,7 +253,6 @@ def cleanup_expired_verifications():
         return 0
     finally:
         session.close()
-
 
 def get_verification_status(email: str) -> Optional[dict]:
     """Get status of verification request for debugging"""
@@ -288,17 +279,15 @@ def get_verification_status(email: str) -> Optional[dict]:
     finally:
         session.close()
 
-
 # ---------------------------
 # DATABASE INITIALIZATION
 # ---------------------------
 
 def init_2fa_db():
-    """Initialize the 2FA database tables"""
+    """Initialize the 2FA database tables - call this AFTER all models are defined"""
     Base.metadata.create_all(bind=engine)
     # Clean up any expired verifications on startup
     cleanup_expired_verifications()
 
-
-# Initialize when imported
-init_2fa_db()
+# DON'T initialize automatically on import - let main.py handle this
+# init_2fa_db()
