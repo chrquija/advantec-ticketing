@@ -1,11 +1,11 @@
 import streamlit as st
 
-st.title("DataDesk")
-st.subheader("A Ticket System Created by ADVANTEC")
+st.title("ATicket")
+st.subheader("Enterprise TIcketing Solution from ADVANTEC")
 
 with st.expander("Learn More About DataDesk"):
     st.write("""
-    DataDesk is your all-in-one solution for managing customer support tickets.
+    DataDesk is your all-in-one solution for managing service requests.
 
     **What you can do:**
     - Create, assign, and track **support tickets** within the ENTIRE ADVANTEC network.
