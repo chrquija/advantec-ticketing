@@ -1487,10 +1487,23 @@ def admin_view():
             "UPLOAD_DIR": UPLOAD_DIR,
             "TEAMS_WEBHOOK_URL": "configured" if TEAMS_WEBHOOK_URL else "(not set)",
             "ALLOW_SELF_SIGNUP": ALLOW_SELF_SIGNUP,
+            "EMAIL_SMTP": "configured" if email_configured() else "(not set)",
+            "APP_BASE_URL": APP_BASE_URL or "(not set)"
         })
+
+        # Test email functionality
+        st.markdown("#### Test Email")
+        if st.button("Send test email to ADMIN_EMAIL"):
+            ok, msg = send_email(ADMIN_EMAIL, "[ATIX] SMTP test", "If you see this, SMTP works.")
+            if ok:
+                st.success(f"✅ Email sent successfully: {msg}")
+            else:
+                st.error(f"❌ Email failed: {msg}")
+
         if st.button("Rebuild DB metadata (safe)"):
             Base.metadata.create_all(bind=engine)
             st.success("Schema ensured.")
+
 
 # ---------------------------
 # 16) SETTINGS / PROFILE
