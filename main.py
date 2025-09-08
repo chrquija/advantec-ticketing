@@ -35,6 +35,18 @@ from sqlalchemy.orm import (
     declarative_base, relationship, sessionmaker, scoped_session, joinedload
 )
 
+# Import 2FA functionality
+try:
+    from TwoFA import create_verification_request, verify_code_and_create_account, cleanup_expired_verifications
+except ImportError:
+    # If TwoFA.py doesn't exist or has issues, create dummy functions so app doesn't crash
+    def create_verification_request(email, name, password):
+        return False, "2FA module not available", ""
+    def verify_code_and_create_account(email, code):
+        return False, "2FA module not available"
+    def cleanup_expired_verifications():
+        return 0
+
 # ---------------------------
 # 0) ENV + GLOBALS
 # ---------------------------
@@ -65,7 +77,7 @@ def email_configured() -> bool:
 # statuses + priorities
 STATUSES = ["New", "In Progress", "Awaiting Approval", "Approved", "Rejected", "On Hold", "Resolved", "Closed"]
 
-# Your P1/P2/P3 wording
+# Ticket Priority Levels P1/P2/P3
 PRIORITIES = [
     "P1 - Productivity Impacted (SLA: Same Day)",
     "P2 - Productivity Not Immediately Impacted (SLA: 2-5 Business Days)",
@@ -440,32 +452,62 @@ def login_view():
     if st.session_state.get("show_signup", False):
         signup_view()
 
+
 def signup_view():
     st.sidebar.header("Create an account")
-    with st.sidebar.form("signup_form"):
-        name = st.text_input("Full name")
-        email = st.text_input("Work email", placeholder=f"you@{ALLOWED_EMAIL_DOMAIN}")
-        pw1 = st.text_input("Password", type="password")
-        pw2 = st.text_input("Confirm password", type="password")
-        submit = st.form_submit_button("Create account")
-        if submit:
-            if not name or not email or not pw1 or not pw2:
-                st.sidebar.error("All fields are required.")
-            elif pw1 != pw2:
-                st.sidebar.error("Passwords do not match.")
-            elif not valid_org_email(email):
-                st.sidebar.error(f"Must be @{ALLOWED_EMAIL_DOMAIN}.")
-            else:
-                with get_db() as db:
-                    if db.query(User).filter(func.lower(User.email) == email.lower()).first():
-                        st.sidebar.error("Account already exists.")
-                    else:
-                        u = User(email=email, name=name, role="user", password_hash=hash_password(pw1))
-                        db.add(u); db.commit()
-                        st.sidebar.success("Account created. Please sign in.")
-                        st.session_state["show_signup"] = False
+
+    # Check if we're in verification mode
+    if st.session_state.get("verification_email"):
+        # Show verification code input
+        email = st.session_state["verification_email"]
+        st.sidebar.write(f"Verification code sent to: {email}")
+
+        with st.sidebar.form("verify_form"):
+            code = st.text_input("Enter 5-digit code", max_chars=5, placeholder="12345")
+            verify = st.form_submit_button("Verify & Create Account")
+
+            if verify:
+                success, message = verify_code_and_create_account(email, code)
+                if success:
+                    st.sidebar.success(message)
+                    st.sidebar.success("Please sign in with your new account.")
+                    # Clear verification state
+                    del st.session_state["verification_email"]
+                    st.session_state["show_signup"] = False
+                    st.rerun()
+                else:
+                    st.sidebar.error(message)
+
+        # Allow user to go back
+        if st.sidebar.button("← Back to sign up"):
+            del st.session_state["verification_email"]
+            st.rerun()
+
+    else:
+        # Show initial signup form
+        with st.sidebar.form("signup_form"):
+            name = st.text_input("Full name")
+            email = st.text_input("Work email", placeholder=f"you@{ALLOWED_EMAIL_DOMAIN}")
+            pw1 = st.text_input("Password", type="password")
+            pw2 = st.text_input("Confirm password", type="password")
+            submit = st.form_submit_button("Send Verification Code")
+
+            if submit:
+                if not name or not email or not pw1 or not pw2:
+                    st.sidebar.error("All fields are required.")
+                elif pw1 != pw2:
+                    st.sidebar.error("Passwords do not match.")
+                elif len(pw1) < 6:
+                    st.sidebar.error("Password must be at least 6 characters.")
+                else:
+                    success, message, _ = create_verification_request(email, name, pw1)
+                    if success:
+                        st.sidebar.success("✅ " + message)
+                        st.sidebar.info("Check your email and enter the 5-digit code below.")
+                        st.session_state["verification_email"] = email.lower()
                         st.rerun()
-                        return
+                    else:
+                        st.sidebar.error(message)
 
 def logout_button():
     user = current_user()
