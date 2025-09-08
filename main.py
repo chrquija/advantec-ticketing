@@ -679,6 +679,7 @@ def ticket_detail_view_by_short_id(short_id: str):
             return
         ticket_detail_view(t.id)
 
+
 def ticket_detail_view(ticket_id: int):
     require_login()
     user = current_user()
@@ -688,57 +689,61 @@ def ticket_detail_view(ticket_id: int):
             st.error("Ticket not found.")
             return
 
-        st.header(f"{t.short_id} — {t.title}")
+        # Compact header with key info
+        st.subheader(f"🎫 {t.short_id} — {t.title}")
 
-        # Top info
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Status", t.status)
-        c2.metric("Priority", t.priority)
-        c3.metric("Assigned To", t.assigned_to.name if t.assigned_to else "—")
-        c4.metric("Project", t.project.name if t.project else "—")
-        c5.metric("Attachments", t.attachments_count)
+        # Status badges in a single row
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Status", t.status)
+        col2.metric("Priority", t.priority.split(' - ')[0] if ' - ' in t.priority else t.priority)  # Show just P1/P2/P3
+        col3.metric("Assigned", t.assigned_to.name if t.assigned_to else "Unassigned")
+        col4.metric("Project", t.project.name if t.project else "None")
 
-        st.caption(f"Created by {t.created_by.name} • {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
-        st.markdown("### Description")
-        st.write(t.description)
+        st.caption(f"Created by {t.created_by.name} on {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        st.markdown("---")
 
-        # Actions (assignment, status, project, due date)
-        st.markdown("### Update")
-        with st.form(f"update_ticket_{t.id}", clear_on_submit=False):
-            colu1, colu2, colu3, colu4 = st.columns(4)
-            with colu1:
-                status = st.selectbox("Status", STATUSES, index=STATUSES.index(t.status))
-            with colu2:
-                priority = st.selectbox("Priority", PRIORITIES, index=PRIORITIES.index(t.priority))
-            with colu3:
-                # assignee selection
-                assignee_options = ["(Unassigned)"]
-                users = list_active_users(db)
-                default_idx = 0
-                for i, u in enumerate(users):
-                    assignee_options.append(u.name)
-                    if t.assigned_to and t.assigned_to.id == u.id:
-                        default_idx = i + 1
-                assignee_choice = st.selectbox("Assign To", assignee_options, index=default_idx)
-            with colu4:
-                proj_options = ["(None)"] + [p.name for p in list_projects(db)]
-                proj_default = 0
-                projects = list_projects(db)
-                if t.project:
-                    for i, p in enumerate(projects):
-                        if p.id == t.project.id:
-                            proj_default = i + 1
-                            break
-                project_choice = st.selectbox("Project", proj_options, index=proj_default)
+        # Description in expandable section
+        with st.expander("📝 Description", expanded=True):
+            st.write(t.description)
 
-            colu5, colu6 = st.columns(2)
-            with colu5:
-                due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else dt.date.today())
-            with colu6:
-                due_time = st.time_input("Due Time", value=t.due_at.time() if t.due_at else dt.time(17, 0))
+        # Update section - collapsed by default
+        with st.expander("⚙️ Update Ticket"):
+            with st.form(f"update_ticket_{t.id}", clear_on_submit=False):
+                colu1, colu2 = st.columns(2)
+                with colu1:
+                    status = st.selectbox("Status", STATUSES, index=STATUSES.index(t.status))
+                    priority = st.selectbox("Priority", PRIORITIES, index=PRIORITIES.index(t.priority))
+                with colu2:
+                    # assignee selection
+                    assignee_options = ["(Unassigned)"]
+                    users = list_active_users(db)
+                    default_idx = 0
+                    for i, u in enumerate(users):
+                        assignee_options.append(u.name)
+                        if t.assigned_to and t.assigned_to.id == u.id:
+                            default_idx = i + 1
+                    assignee_choice = st.selectbox("Assign To", assignee_options, index=default_idx)
 
-            note = st.text_input("Update note (optional)")
-            do_update = st.form_submit_button("Save Changes", use_container_width=True)
+                    proj_options = ["(None)"] + [p.name for p in list_projects(db)]
+                    proj_default = 0
+                    projects = list_projects(db)
+                    if t.project:
+                        for i, p in enumerate(projects):
+                            if p.id == t.project.id:
+                                proj_default = i + 1
+                                break
+                    project_choice = st.selectbox("Project", proj_options, index=proj_default)
+
+                colu3, colu4 = st.columns(2)
+                with colu3:
+                    due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else dt.date.today())
+                with colu4:
+                    due_time = st.time_input("Due Time", value=t.due_at.time() if t.due_at else dt.time(17, 0))
+
+                note = st.text_input("Update note (optional)")
+                do_update = st.form_submit_button("💾 Save Changes", use_container_width=True)
+
+                # ... existing update logic ...
 
             if do_update:
                 # Permissions: creator/assignee can update; managers/admin can update any
