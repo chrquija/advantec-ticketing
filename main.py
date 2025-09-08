@@ -689,25 +689,47 @@ def ticket_detail_view(ticket_id: int):
             st.error("Ticket not found.")
             return
 
-        # Compact header with key info
+        # Compact header
         st.subheader(f"🎫 {t.short_id} — {t.title}")
 
-        # Status badges in a single row
+        # Quick status overview
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Status", t.status)
-        col2.metric("Priority", t.priority.split(' - ')[0] if ' - ' in t.priority else t.priority)  # Show just P1/P2/P3
+        col2.metric("Priority", t.priority.split(' - ')[0] if ' - ' in t.priority else t.priority)
         col3.metric("Assigned", t.assigned_to.name if t.assigned_to else "Unassigned")
-        col4.metric("Project", t.project.name if t.project else "None")
+        col4.metric("Attachments", t.attachments_count)
 
-        st.caption(f"Created by {t.created_by.name} on {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        st.caption(f"Created by {t.created_by.name} • {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
         st.markdown("---")
 
-        # Description in expandable section
-        with st.expander("📝 Description", expanded=True):
-            st.write(t.description)
+        # Tabbed interface
+        tabs = ["📝 Details", "⚙️ Update", "📎 Files", "💬 Comments"]
+        if t.request_project_charge and t.project and t.project.manager_id:
+            tabs.insert(2, "✅ Approval")
 
-        # Update section - collapsed by default
-        with st.expander("⚙️ Update Ticket"):
+        if len(tabs) == 4:
+            tab1, tab2, tab3, tab4 = st.tabs(tabs)
+        else:
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(tabs)
+
+        # Details Tab
+        with tab1:
+            st.markdown("**Description:**")
+            st.write(t.description)
+            st.markdown("**Ticket Information:**")
+            info_col1, info_col2 = st.columns(2)
+            with info_col1:
+                st.write(f"**Project:** {t.project.name if t.project else 'None'}")
+                st.write(f"**Category:** {t.category}")
+                st.write(f"**Created:** {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            with info_col2:
+                st.write(f"**Updated:** {t.updated_at.strftime('%Y-%m-%d %H:%M UTC')}")
+                if t.due_at:
+                    st.write(f"**Due:** {t.due_at.strftime('%Y-%m-%d %H:%M UTC')}")
+                st.write(f"**Request Charge:** {'Yes' if t.request_project_charge else 'No'}")
+
+        # Update Tab
+        with tab2:
             with st.form(f"update_ticket_{t.id}", clear_on_submit=False):
                 colu1, colu2 = st.columns(2)
                 with colu1:
@@ -743,139 +765,157 @@ def ticket_detail_view(ticket_id: int):
                 note = st.text_input("Update note (optional)")
                 do_update = st.form_submit_button("💾 Save Changes", use_container_width=True)
 
-                # ... existing update logic ...
-
-            if do_update:
-                # Permissions: creator/assignee can update; managers/admin can update any
-                can_edit = (user.role in ["manager", "admin"]) or (user.id in [t.created_by_id, t.assigned_to_id or -1])
-                if not can_edit:
-                    st.error("You cannot update this ticket.")
-                else:
-                    prev_status = t.status
-                    t.status = status
-                    t.priority = priority
-                    # assignee
-                    if assignee_choice == "(Unassigned)":
-                        t.assigned_to_id = None
+                if do_update:
+                    # Permissions: creator/assignee can update; managers/admin can update any
+                    can_edit = (user.role in ["manager", "admin"]) or (
+                                user.id in [t.created_by_id, t.assigned_to_id or -1])
+                    if not can_edit:
+                        st.error("You cannot update this ticket.")
                     else:
-                        chosen = next((u for u in users if u.name == assignee_choice), None)
-                        t.assigned_to_id = chosen.id if chosen else t.assigned_to_id
-                    # project
-                    if project_choice == "(None)":
-                        t.project_id = None
+                        prev_status = t.status
+                        t.status = status
+                        t.priority = priority
+                        # assignee
+                        if assignee_choice == "(Unassigned)":
+                            t.assigned_to_id = None
+                        else:
+                            chosen = next((u for u in users if u.name == assignee_choice), None)
+                            t.assigned_to_id = chosen.id if chosen else t.assigned_to_id
+                        # project
+                        if project_choice == "(None)":
+                            t.project_id = None
+                        else:
+                            chosen = next((p for p in projects if p.name == project_choice), None)
+                            t.project_id = chosen.id if chosen else t.project_id
+                        # due
+                        t.due_at = dt.datetime.combine(due, due_time) if isinstance(due, dt.date) else None
+                        t.updated_at = utcnow()
+                        t.last_activity_at = utcnow()
+                        db.commit()
+
+                        add_history(db, t.id, user.id, "update", from_status=prev_status, to_status=t.status,
+                                    note=note or "")
+
+                        send_teams_notification(
+                            f"Ticket {t.short_id} updated",
+                            f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
+                        )
+                        st.success("Changes saved.")
+                        st.rerun()
+
+        # Approval Tab (conditional)
+        approval_tab = tab3 if t.request_project_charge and t.project and t.project.manager_id else None
+        if approval_tab:
+            with approval_tab:
+                is_pm = (user.id == t.project.manager_id) or (user.role in ["manager", "admin"])
+                st.write(f"**Approval status:** {t.approval_status}")
+                if t.approved_by:
+                    st.write(f"**Approved by:** {t.approved_by.name}")
+                if t.approval_note:
+                    st.write(f"**Note:** {t.approval_note}")
+
+                if is_pm and t.approval_status in ["Pending", "Rejected"]:
+                    colap1, colap2 = st.columns(2)
+                    with colap1:
+                        note = st.text_input("Approval note (optional)", key=f"ap_note_{t.id}")
+                    with colap2:
+                        ap = st.radio("Decision", ["Approve", "Reject"], horizontal=True)
+                    if st.button("Submit decision", type="primary"):
+                        t.approval_status = "Approved" if ap == "Approve" else "Rejected"
+                        t.approved_by_id = user.id
+                        t.approval_note = note
+                        if ap == "Approve" and t.status == "Awaiting Approval":
+                            t.status = "Approved"
+                        t.updated_at = utcnow()
+                        db.commit()
+                        add_history(db, t.id, user.id, "approval", from_status="Awaiting Approval", to_status=t.status,
+                                    note=f"{ap}: {note}")
+                        send_teams_notification(
+                            f"Ticket {t.short_id} {ap} by {user.name}",
+                            f"Approval note: {note or '(none)'}"
+                        )
+                        st.success(f"Ticket {ap}.")
+                        st.rerun()
+
+        # Files Tab
+        files_tab = tab4 if approval_tab else tab3
+        with files_tab:
+            st.markdown("#### Current Attachments")
+            with get_db() as db2:
+                atts = db2.query(Attachment).filter(Attachment.ticket_id == t.id).order_by(
+                    Attachment.uploaded_at.asc()).all()
+            if atts:
+                for a in atts:
+                    colA1, colA2, colA3, colA4 = st.columns([5, 2, 2, 2])
+                    colA1.write(a.file_name)
+                    colA2.write(f"{a.file_size / 1024:.1f} KB")
+                    colA3.write(a.uploaded_at.strftime("%Y-%m-%d"))
+                    try:
+                        with open(a.file_path, "rb") as f:
+                            colA4.download_button("Download", data=f.read(), file_name=a.file_name, key=f"dl_{a.id}")
+                    except FileNotFoundError:
+                        colA4.write("❌ Missing")
+            else:
+                st.info("No attachments yet.")
+
+            st.markdown("#### Add New Attachments")
+            upfiles = st.file_uploader("Choose files", accept_multiple_files=True, key=f"att_up_{t.id}")
+            if upfiles:
+                ensure_dirs()
+                ticket_dir = os.path.join(UPLOAD_DIR, t.short_id)
+                os.makedirs(ticket_dir, exist_ok=True)
+                for f in upfiles:
+                    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
+                    path = os.path.join(ticket_dir, safe_name)
+                    with open(path, "wb") as out:
+                        out.write(f.getbuffer())
+                    with get_db() as db3:
+                        a = Attachment(
+                            ticket_id=t.id, uploader_id=user.id, file_name=safe_name,
+                            file_path=path, content_type=f.type or "", file_size=len(f.getbuffer())
+                        )
+                        db3.add(a)
+                        tt = db3.query(Ticket).get(t.id)
+                        tt.attachments_count = (tt.attachments_count or 0) + 1
+                        db3.commit()
+                add_history(db, t.id, user.id, "attachments", note=f"{len(upfiles)} new attachment(s)")
+                st.success("Attachment(s) saved.")
+                st.rerun()
+
+        # Comments Tab
+        comments_tab = tab5 if approval_tab else tab4
+        with comments_tab:
+            st.markdown("#### Discussion History")
+            with get_db() as db4:
+                comments = db4.query(Comment).filter(Comment.ticket_id == t.id).order_by(Comment.created_at.asc()).all()
+            if comments:
+                for c in comments:
+                    with st.container():
+                        st.markdown(f"**{c.author.name}** — *{c.created_at.strftime('%Y-%m-%d %H:%M UTC')}*")
+                        if c.is_internal:
+                            st.markdown("🔒 *Internal Note*")
+                        st.write(c.body)
+                        st.markdown("---")
+            else:
+                st.info("No comments yet.")
+
+            st.markdown("#### Add Comment")
+            with st.form(f"comment_{t.id}"):
+                body = st.text_area("Your comment", height=120,
+                                    placeholder="Add your thoughts, updates, or questions...")
+                internal = st.checkbox("🔒 Internal note (visible to staff only)")
+                if st.form_submit_button("💬 Post Comment", use_container_width=True):
+                    if not body.strip():
+                        st.error("Comment cannot be empty.")
                     else:
-                        chosen = next((p for p in projects if p.name == project_choice), None)
-                        t.project_id = chosen.id if chosen else t.project_id
-                    # due
-                    t.due_at = dt.datetime.combine(due, due_time) if isinstance(due, dt.date) else None
-                    t.updated_at = utcnow()
-                    t.last_activity_at = utcnow()
-                    db.commit()
-
-                    add_history(db, t.id, user.id, "update", from_status=prev_status, to_status=t.status, note=note or "")
-
-                    send_teams_notification(
-                        f"Ticket {t.short_id} updated",
-                        f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
-                    )
-                    st.success("Changes saved.")
-
-        # Approval section (if applicable)
-        if t.request_project_charge and t.project and t.project.manager_id:
-            is_pm = (user.id == t.project.manager_id) or (user.role in ["manager", "admin"])
-            st.markdown("### Project Charge Approval")
-            st.write(f"Approval status: **{t.approval_status}**")
-            if is_pm and t.approval_status in ["Pending", "Rejected"]:
-                colap1, colap2 = st.columns(2)
-                with colap1:
-                    note = st.text_input("Approval note (optional)", key=f"ap_note_{t.id}")
-                with colap2:
-                    ap = st.radio("Decision", ["Approve", "Reject"], horizontal=True)
-                if st.button("Submit decision", type="primary"):
-                    t.approval_status = "Approved" if ap == "Approve" else "Rejected"
-                    t.approved_by_id = user.id
-                    t.approval_note = note
-                    if ap == "Approve" and t.status == "Awaiting Approval":
-                        t.status = "Approved"
-                    t.updated_at = utcnow()
-                    db.commit()
-                    add_history(db, t.id, user.id, "approval", from_status="Awaiting Approval", to_status=t.status, note=f"{ap}: {note}")
-                    send_teams_notification(
-                        f"Ticket {t.short_id} {ap} by {user.name}",
-                        f"Approval note: {note or '(none)'}"
-                    )
-                    st.success(f"Ticket {ap}.")
-                    st.rerun()
-                    return
-
-        # Attachments
-        st.markdown("### Attachments")
-        with get_db() as db2:
-            atts = db2.query(Attachment).filter(Attachment.ticket_id == t.id).order_by(Attachment.uploaded_at.asc()).all()
-        if atts:
-            for a in atts:
-                colA1, colA2, colA3, colA4 = st.columns([5,2,2,2])
-                colA1.write(a.file_name)
-                colA2.write(f"{a.file_size/1024:.1f} KB")
-                colA3.write(a.uploaded_at.strftime("%Y-%m-%d"))
-                with open(a.file_path, "rb") as f:
-                    colA4.download_button("Download", data=f.read(), file_name=a.file_name, key=f"dl_{a.id}")
-        else:
-            st.caption("No attachments yet.")
-
-        # Add new attachments
-        upfiles = st.file_uploader("Add attachments", accept_multiple_files=True, key=f"att_up_{t.id}")
-        if upfiles:
-            ensure_dirs()
-            ticket_dir = os.path.join(UPLOAD_DIR, t.short_id)
-            os.makedirs(ticket_dir, exist_ok=True)
-            for f in upfiles:
-                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
-                path = os.path.join(ticket_dir, safe_name)
-                with open(path, "wb") as out:
-                    out.write(f.getbuffer())
-                with get_db() as db3:
-                    a = Attachment(
-                        ticket_id=t.id, uploader_id=user.id, file_name=safe_name,
-                        file_path=path, content_type=f.type or "", file_size=len(f.getbuffer())
-                    )
-                    db3.add(a)
-                    tt = db3.query(Ticket).get(t.id)
-                    tt.attachments_count = (tt.attachments_count or 0) + 1
-                    db3.commit()
-            add_history(db, t.id, user.id, "attachments", note=f"{len(upfiles)} new attachment(s)")
-            st.success("Attachment(s) saved.")
-            st.rerun()
-            return
-
-        # Comments
-        st.markdown("### Comments")
-        with get_db() as db4:
-            comments = db4.query(Comment).filter(Comment.ticket_id == t.id).order_by(Comment.created_at.asc()).all()
-        if comments:
-            for c in comments:
-                st.markdown(f"**{c.author.name}** — *{c.created_at.strftime('%Y-%m-%d %H:%M UTC')}*")
-                st.write(c.body)
-                st.markdown("---")
-        else:
-            st.caption("No comments yet.")
-
-        with st.form(f"comment_{t.id}"):
-            body = st.text_area("Add a comment", height=120)
-            internal = st.checkbox("Internal note (visible to staff only)")
-            if st.form_submit_button("Post Comment", use_container_width=True):
-                if not body.strip():
-                    st.error("Comment cannot be empty.")
-                else:
-                    with get_db() as db5:
-                        c = Comment(ticket_id=t.id, author_id=user.id, body=body.strip(), is_internal=internal)
-                        db5.add(c); db5.commit()
-                    add_history(db, t.id, user.id, "comment", note="internal" if internal else "comment")
-                    send_teams_notification(f"New comment on {t.short_id}", f"By: {user.name}\n{body[:400]}")
-                    st.success("Comment posted.")
-                    st.rerun()
-                    return
-
+                        with get_db() as db5:
+                            c = Comment(ticket_id=t.id, author_id=user.id, body=body.strip(), is_internal=internal)
+                            db5.add(c);
+                            db5.commit()
+                        add_history(db, t.id, user.id, "comment", note="internal" if internal else "comment")
+                        send_teams_notification(f"New comment on {t.short_id}", f"By: {user.name}\n{body[:400]}")
+                        st.success("Comment posted.")
+                        st.rerun()
 # ---------------------------
 # 12) APPROVALS PAGE
 # ---------------------------
