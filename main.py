@@ -1,9 +1,9 @@
 import streamlit as st
 
-st.title("ATicket")
+st.title("aTicket")
 st.subheader("Enterprise Ticketing Solution from ADVANTEC")
 
-with st.expander("Learn More About DataDesk"):
+with st.expander("Learn More About aTicket"):
     st.write("""
     DataDesk is your all-in-one solution for managing service requests.
 
