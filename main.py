@@ -484,7 +484,7 @@ def sidebar_nav():
     if user:
         # View-as-user toggle for admins
         if user.role == "admin":
-            st.sidebar.toggle("👁 View as end user", key="view_as_user", value=st.session_state.get("view_as_user", False))
+            st.sidebar.toggle("👁 View as user", key="view_as_user", value=st.session_state.get("view_as_user", False))
         role_label = effective_role()
         suffix = " (viewing as user)" if (user.role == "admin" and role_label == "user") else ""
         st.sidebar.markdown(f"**Signed in as:** {user.name}  \n*Role:* `{role_label}`{suffix}")
