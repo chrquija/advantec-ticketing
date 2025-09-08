@@ -29,7 +29,7 @@ from email.message import EmailMessage
 import pandas as pd
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, func, or_
+    ForeignKey, func, or_, text, inspect, event
 )
 from sqlalchemy.orm import (
     declarative_base, relationship, sessionmaker, scoped_session, joinedload
@@ -81,6 +81,17 @@ connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = scoped_session(sessionmaker(bind=engine, autocommit=False, autoflush=False))
 Base = declarative_base()
+
+# Enforce SQLite foreign keys so deletes/updates can't orphan rows
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON;")
+            cursor.close()
+        except Exception:
+            pass
 
 def utcnow():
     return dt.datetime.utcnow()
@@ -138,6 +149,9 @@ class Ticket(Base):
     teams_thread_url = Column(String(500), nullable=True)
     attachments_count = Column(Integer, default=0)
 
+    # NEW: archive flag
+    is_archived = Column(Boolean, default=False, index=True)
+
     created_by = relationship("User", foreign_keys=[created_by_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])
     approved_by = relationship("User", foreign_keys=[approved_by_id])
@@ -173,7 +187,7 @@ class History(Base):
     id = Column(Integer, primary_key=True)
     ticket_id = Column(Integer, ForeignKey("tickets.id"), index=True)
     actor_id = Column(Integer, ForeignKey("users.id"))
-    action = Column(String(200))       # e.g., "status_change", "assignment", "created", "comment", "approval"
+    action = Column(String(200))       # e.g., "status_change", "assignment", "created", "comment", "approval", "archive"
     from_status = Column(String(50), nullable=True)
     to_status = Column(String(50), nullable=True)
     note = Column(Text, nullable=True)
@@ -258,7 +272,7 @@ def notify_assignment_email(ticket: Ticket, assigned_to: User, assigned_by: User
     url_hint = APP_BASE_URL or ""
     subject = f"[ATIX] {ticket.short_id} assigned to you"
     due_line = f"\nDue: {ticket.due_at.strftime('%Y-%m-%d %H:%M UTC')}" if ticket.due_at else ""
-    text = (
+    text_body = (
         f"Hi {assigned_to.name},\n\n"
         f"The following ticket has been assigned to you by {assigned_by.name}:\n"
         f"Ticket: {ticket.short_id}\n"
@@ -285,7 +299,7 @@ def notify_assignment_email(ticket: Ticket, assigned_to: User, assigned_by: User
     <p>Open ATIX: <a href="{url_hint}">{url_hint or '(set APP_BASE_URL to include a link)'}</a></p>
     <p>— ATIX</p>
     """
-    ok, msg = send_email(assigned_to.email, subject, text, html)
+    ok, msg = send_email(assigned_to.email, subject, text_body, html)
     if not ok and assigned_by and assigned_by.role == "admin":
         st.toast(f"Email not sent: {msg}", icon="⚠️")
     return ok, msg
@@ -298,7 +312,7 @@ def add_history(db, ticket_id: int, actor_id: int, action: str, from_status: Opt
     db.commit()
 
 # ---------------------------
-# 4) DB INIT + SEED (+ priority migration)
+# 4) DB INIT + MIGRATIONS
 # ---------------------------
 def migrate_priorities(db):
     """Map any legacy priorities to the new P1/P2/P3 scheme."""
@@ -320,9 +334,37 @@ def migrate_priorities(db):
     if updated:
         db.commit()
 
+def ensure_column(engine, table_name: str, column_name: str, ddl_by_dialect: dict):
+    """Add a column if missing (simple migration)."""
+    inspector = inspect(engine)
+    cols = [c["name"].lower() for c in inspector.get_columns(table_name)]
+    if column_name.lower() in cols:
+        return
+    dialect = engine.dialect.name
+    ddl = ddl_by_dialect.get(dialect, ddl_by_dialect.get("default"))
+    if not ddl:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     ensure_dirs()
+
+    # One-time: ensure 'is_archived' exists
+    ensure_column(
+        engine,
+        "tickets",
+        "is_archived",
+        {
+            "sqlite": "ALTER TABLE tickets ADD COLUMN is_archived BOOLEAN DEFAULT 0",
+            "postgresql": "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+            "mysql": "ALTER TABLE tickets ADD COLUMN is_archived TINYINT(1) DEFAULT 0",
+            "mssql": "ALTER TABLE tickets ADD is_archived BIT DEFAULT 0",
+            "default": "ALTER TABLE tickets ADD COLUMN is_archived BOOLEAN DEFAULT FALSE",
+        },
+    )
+
     db = SessionLocal()
     try:
         # One-time migration
@@ -611,7 +653,8 @@ def create_ticket_view():
                     project_id=project_id,
                     request_project_charge=bool(request_charge),
                     approval_status="Pending" if request_charge else "Not Requested",
-                    due_at=due_at
+                    due_at=due_at,
+                    is_archived=False
                 )
                 db.add(t); db.commit()
 
@@ -708,6 +751,9 @@ def my_tickets_view():
               .options(joinedload(Ticket.created_by), joinedload(Ticket.assigned_to), joinedload(Ticket.project))
         )
 
+        # exclude archived by default
+        qs = qs.filter(Ticket.is_archived == False)
+
         if view == "Created by me":
             qs = qs.filter(Ticket.created_by_id == user.id)
         elif view == "Assigned to me":
@@ -776,12 +822,20 @@ def team_tickets_view():
             projects = ["(Any)"] + [p.name for p in list_projects(db, active_only=False)]
             proj = st.selectbox("Project", projects, index=0)
 
+        # Admin-only toggle to see archived tickets
+        show_archived = False
+        if role == "admin":
+            show_archived = st.checkbox("Show archived (admin)", value=False)
+
         qs = (
             db.query(Ticket)
               .options(joinedload(Ticket.created_by), joinedload(Ticket.assigned_to), joinedload(Ticket.project))
               .order_by(Ticket.updated_at.desc())
         )
         qs = qs.filter(Ticket.status.in_(status), Ticket.priority.in_(prio))
+        if not show_archived:
+            qs = qs.filter(Ticket.is_archived == False)
+
         if assignee != "(Anyone)":
             u = db.query(User).filter(User.name == assignee).first()
             if u:
@@ -826,6 +880,7 @@ def ticket_detail_view_by_short_id(short_id: str):
 def ticket_detail_view(ticket_id: int):
     require_login()
     user = current_user()
+    role = effective_role()
     with get_db() as db:
         t = (
             db.query(Ticket)
@@ -841,6 +896,10 @@ def ticket_detail_view(ticket_id: int):
             st.error("Ticket not found.")
             return
 
+        # If archived, non-admins can view but not edit; show notice
+        if t.is_archived:
+            st.info("🗄️ This ticket is archived and read-only. Admins can unarchive to modify.")
+
         # Compact header
         st.subheader(f"🎫 {t.short_id} — {t.title}")
 
@@ -851,7 +910,34 @@ def ticket_detail_view(ticket_id: int):
         col3.metric("Assigned", t.assigned_to.name if t.assigned_to else "Unassigned")
         col4.metric("Attachments", t.attachments_count)
 
-        st.caption(f"Created by {t.created_by.name} • {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        # Null-safe caption (fixes crash if creator was removed)
+        creator_name = t.created_by.name if t.created_by else "Unknown (user removed)"
+        st.caption(f"Created by {creator_name} • {t.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        st.markdown("---")
+
+        # Admin-only Archive/Unarchive controls
+        if role == "admin":
+            ac1, ac2 = st.columns([1, 8])
+            with ac1:
+                if not t.is_archived:
+                    if st.button("🗄️ Archive", key=f"arch_{t.id}"):
+                        t.is_archived = True
+                        t.updated_at = utcnow()
+                        t.last_activity_at = utcnow()
+                        db.commit()
+                        add_history(db, t.id, user.id, "archive", note="archived")
+                        st.success("Ticket archived.")
+                        st.rerun()
+                else:
+                    if st.button("♻️ Unarchive", key=f"unarch_{t.id}"):
+                        t.is_archived = False
+                        t.updated_at = utcnow()
+                        t.last_activity_at = utcnow()
+                        db.commit()
+                        add_history(db, t.id, user.id, "archive", note="unarchived")
+                        st.success("Ticket unarchived.")
+                        st.rerun()
+
         st.markdown("---")
 
         # Tabs
@@ -882,83 +968,86 @@ def ticket_detail_view(ticket_id: int):
 
         # Update Tab
         with tab2:
-            with st.form(f"update_ticket_{t.id}", clear_on_submit=False):
-                colu1, colu2 = st.columns(2)
-                with colu1:
-                    status = st.selectbox("Status", STATUSES, index=STATUSES.index(t.status))
-                    priority = st.selectbox("Priority", PRIORITIES, index=PRIORITIES.index(t.priority) if t.priority in PRIORITIES else 2)
-                with colu2:
-                    # assignee selection
-                    assignee_options = ["(Unassigned)"]
-                    users = list_active_users(db)
-                    default_idx = 0
-                    for i, u in enumerate(users):
-                        assignee_options.append(u.name)
-                        if t.assigned_to and t.assigned_to.id == u.id:
-                            default_idx = i + 1
-                    assignee_choice = st.selectbox("Assign To", assignee_options, index=default_idx)
+            if t.is_archived:
+                st.info("This ticket is archived. Unarchive to edit.")
+            else:
+                with st.form(f"update_ticket_{t.id}", clear_on_submit=False):
+                    colu1, colu2 = st.columns(2)
+                    with colu1:
+                        status = st.selectbox("Status", STATUSES, index=STATUSES.index(t.status))
+                        priority = st.selectbox("Priority", PRIORITIES, index=PRIORITIES.index(t.priority) if t.priority in PRIORITIES else 2)
+                    with colu2:
+                        # assignee selection
+                        assignee_options = ["(Unassigned)"]
+                        users = list_active_users(db)
+                        default_idx = 0
+                        for i, u in enumerate(users):
+                            assignee_options.append(u.name)
+                            if t.assigned_to and t.assigned_to.id == u.id:
+                                default_idx = i + 1
+                        assignee_choice = st.selectbox("Assign To", assignee_options, index=default_idx)
 
-                    proj_options = ["(None)"] + [p.name for p in list_projects(db)]
-                    proj_default = 0
-                    projects = list_projects(db)
-                    if t.project:
-                        for i, p in enumerate(projects):
-                            if p.id == t.project.id:
-                                proj_default = i + 1
-                                break
-                    project_choice = st.selectbox("Project", proj_options, index=proj_default)
+                        proj_options = ["(None)"] + [p.name for p in list_projects(db)]
+                        proj_default = 0
+                        projects = list_projects(db)
+                        if t.project:
+                            for i, p in enumerate(projects):
+                                if p.id == t.project.id:
+                                    proj_default = i + 1
+                                    break
+                        project_choice = st.selectbox("Project", proj_options, index=proj_default)
 
-                colu3, colu4 = st.columns(2)
-                with colu3:
-                    due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else dt.date.today())
-                with colu4:
-                    due_time = st.time_input("Due Time", value=t.due_at.time() if t.due_at else dt.time(17, 0))
+                    colu3, colu4 = st.columns(2)
+                    with colu3:
+                        due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else dt.date.today())
+                    with colu4:
+                        due_time = st.time_input("Due Time", value=t.due_at.time() if t.due_at else dt.time(17, 0))
 
-                note = st.text_input("Update note (optional)")
-                do_update = st.form_submit_button("💾 Save Changes", use_container_width=True)
+                    note = st.text_input("Update note (optional)")
+                    do_update = st.form_submit_button("💾 Save Changes", use_container_width=True)
 
-                if do_update:
-                    # Permissions: creator/assignee can update; managers/admin can update any
-                    can_edit = (effective_role() in ["manager", "admin"]) or (user.id in [t.created_by_id, t.assigned_to_id or -1])
-                    if not can_edit:
-                        st.error("You cannot update this ticket.")
-                    else:
-                        prev_status = t.status
-                        prev_assigned_id = t.assigned_to_id
-
-                        t.status = status
-                        t.priority = priority
-                        # assignee
-                        if assignee_choice == "(Unassigned)":
-                            t.assigned_to_id = None
+                    if do_update:
+                        # Permissions: creator/assignee can update; managers/admin can update any
+                        can_edit = (effective_role() in ["manager", "admin"]) or (user.id in [t.created_by_id, t.assigned_to_id or -1])
+                        if not can_edit:
+                            st.error("You cannot update this ticket.")
                         else:
-                            chosen = next((u for u in users if u.name == assignee_choice), None)
-                            t.assigned_to_id = chosen.id if chosen else t.assigned_to_id
-                        # project
-                        if project_choice == "(None)":
-                            t.project_id = None
-                        else:
-                            chosen = next((p for p in projects if p.name == project_choice), None)
-                            t.project_id = chosen.id if chosen else t.project_id
-                        # due
-                        t.due_at = dt.datetime.combine(due, due_time) if isinstance(due, dt.date) else None
-                        t.updated_at = utcnow()
-                        t.last_activity_at = utcnow()
-                        db.commit()
+                            prev_status = t.status
+                            prev_assigned_id = t.assigned_to_id
 
-                        add_history(db, t.id, user.id, "update", from_status=prev_status, to_status=t.status, note=note or "")
+                            t.status = status
+                            t.priority = priority
+                            # assignee
+                            if assignee_choice == "(Unassigned)":
+                                t.assigned_to_id = None
+                            else:
+                                chosen = next((u for u in users if u.name == assignee_choice), None)
+                                t.assigned_to_id = chosen.id if chosen else t.assigned_to_id
+                            # project
+                            if project_choice == "(None)":
+                                t.project_id = None
+                            else:
+                                chosen = next((p for p in projects if p.name == project_choice), None)
+                                t.project_id = chosen.id if chosen else t.project_id
+                            # due
+                            t.due_at = dt.datetime.combine(due, due_time) if isinstance(due, dt.date) else None
+                            t.updated_at = utcnow()
+                            t.last_activity_at = utcnow()
+                            db.commit()
 
-                        # If assignment changed -> email assignee
-                        if t.assigned_to_id and t.assigned_to_id != prev_assigned_id:
-                            new_assignee = db.query(User).get(t.assigned_to_id)
-                            notify_assignment_email(t, new_assignee, user)
+                            add_history(db, t.id, user.id, "update", from_status=prev_status, to_status=t.status, note=note or "")
 
-                        send_teams_notification(
-                            f"Ticket {t.short_id} updated",
-                            f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
-                        )
-                        st.success("Changes saved.")
-                        st.rerun()
+                            # If assignment changed -> email assignee
+                            if t.assigned_to_id and t.assigned_to_id != prev_assigned_id:
+                                new_assignee = db.query(User).get(t.assigned_to_id)
+                                notify_assignment_email(t, new_assignee, user)
+
+                            send_teams_notification(
+                                f"Ticket {t.short_id} updated",
+                                f"Status: {t.status}\nPriority: {t.priority}\nAssignee: {t.assigned_to.name if t.assigned_to else '—'}\nBy: {user.name}"
+                            )
+                            st.success("Changes saved.")
+                            st.rerun()
 
         # Approval Tab (conditional)
         approval_tab = tab3 if t.request_project_charge and t.project and t.project.manager_id else None
@@ -971,7 +1060,7 @@ def ticket_detail_view(ticket_id: int):
                 if t.approval_note:
                     st.write(f"**Note:** {t.approval_note}")
 
-                if is_pm and t.approval_status in ["Pending", "Rejected"]:
+                if not t.is_archived and is_pm and t.approval_status in ["Pending", "Rejected"]:
                     colap1, colap2 = st.columns(2)
                     with colap1:
                         note = st.text_input("Approval note (optional)", key=f"ap_note_{t.id}")
@@ -992,6 +1081,8 @@ def ticket_detail_view(ticket_id: int):
                         )
                         st.success(f"Ticket {ap}.")
                         st.rerun()
+                elif t.is_archived:
+                    st.caption("This ticket is archived. Unarchive to submit a decision.")
 
         # Files Tab
         files_tab = tab4 if approval_tab else tab3
@@ -1013,29 +1104,32 @@ def ticket_detail_view(ticket_id: int):
             else:
                 st.info("No attachments yet.")
 
-            st.markdown("#### Add New Attachments")
-            upfiles = st.file_uploader("Choose files", accept_multiple_files=True, key=f"att_up_{t.id}")
-            if upfiles:
-                ensure_dirs()
-                ticket_dir = os.path.join(UPLOAD_DIR, t.short_id)
-                os.makedirs(ticket_dir, exist_ok=True)
-                for f in upfiles:
-                    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
-                    path = os.path.join(ticket_dir, safe_name)
-                    with open(path, "wb") as out:
-                        out.write(f.getbuffer())
-                    with get_db() as db3:
-                        a = Attachment(
-                            ticket_id=t.id, uploader_id=user.id, file_name=safe_name,
-                            file_path=path, content_type=f.type or "", file_size=len(f.getbuffer())
-                        )
-                        db3.add(a)
-                        tt = db3.query(Ticket).get(t.id)
-                        tt.attachments_count = (tt.attachments_count or 0) + 1
-                        db3.commit()
-                add_history(db, t.id, user.id, "attachments", note=f"{len(upfiles)} new attachment(s)")
-                st.success("Attachment(s) saved.")
-                st.rerun()
+            if t.is_archived:
+                st.caption("This ticket is archived. Unarchive to add files.")
+            else:
+                st.markdown("#### Add New Attachments")
+                upfiles = st.file_uploader("Choose files", accept_multiple_files=True, key=f"att_up_{t.id}")
+                if upfiles:
+                    ensure_dirs()
+                    ticket_dir = os.path.join(UPLOAD_DIR, t.short_id)
+                    os.makedirs(ticket_dir, exist_ok=True)
+                    for f in upfiles:
+                        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
+                        path = os.path.join(ticket_dir, safe_name)
+                        with open(path, "wb") as out:
+                            out.write(f.getbuffer())
+                        with get_db() as db3:
+                            a = Attachment(
+                                ticket_id=t.id, uploader_id=user.id, file_name=safe_name,
+                                file_path=path, content_type=f.type or "", file_size=len(f.getbuffer())
+                            )
+                            db3.add(a)
+                            tt = db3.query(Ticket).get(t.id)
+                            tt.attachments_count = (tt.attachments_count or 0) + 1
+                            db3.commit()
+                    add_history(db, t.id, user.id, "attachments", note=f"{len(upfiles)} new attachment(s)")
+                    st.success("Attachment(s) saved.")
+                    st.rerun()
 
         # Comments Tab
         comments_tab = tab5 if approval_tab else tab4
@@ -1060,22 +1154,25 @@ def ticket_detail_view(ticket_id: int):
             else:
                 st.info("No comments yet.")
 
-            st.markdown("#### Add Comment")
-            with st.form(f"comment_{t.id}"):
-                body = st.text_area("Your comment", height=120,
-                                    placeholder="Add your thoughts, updates, or questions...")
-                internal = st.checkbox("🔒 Internal note (visible to staff only)")
-                if st.form_submit_button("💬 Post Comment", use_container_width=True):
-                    if not body.strip():
-                        st.error("Comment cannot be empty.")
-                    else:
-                        with get_db() as db5:
-                            c = Comment(ticket_id=t.id, author_id=user.id, body=body.strip(), is_internal=internal)
-                            db5.add(c); db5.commit()
-                        add_history(db, t.id, user.id, "comment", note="internal" if internal else "comment")
-                        send_teams_notification(f"New comment on {t.short_id}", f"By: {user.name}\n{body[:400]}")
-                        st.success("Comment posted.")
-                        st.rerun()
+            if t.is_archived:
+                st.caption("This ticket is archived. Unarchive to add comments.")
+            else:
+                st.markdown("#### Add Comment")
+                with st.form(f"comment_{t.id}"):
+                    body = st.text_area("Your comment", height=120,
+                                        placeholder="Add your thoughts, updates, or questions...")
+                    internal = st.checkbox("🔒 Internal note (visible to staff only)")
+                    if st.form_submit_button("💬 Post Comment", use_container_width=True):
+                        if not body.strip():
+                            st.error("Comment cannot be empty.")
+                        else:
+                            with get_db() as db5:
+                                c = Comment(ticket_id=t.id, author_id=user.id, body=body.strip(), is_internal=internal)
+                                db5.add(c); db5.commit()
+                            add_history(db, t.id, user.id, "comment", note="internal" if internal else "comment")
+                            send_teams_notification(f"New comment on {t.short_id}", f"By: {user.name}\n{body[:400]}")
+                            st.success("Comment posted.")
+                            st.rerun()
 
 # ---------------------------
 # 12) APPROVALS PAGE
@@ -1092,7 +1189,11 @@ def approvals_view():
         qs = (
             db.query(Ticket)
               .options(joinedload(Ticket.created_by), joinedload(Ticket.project))
-              .filter(Ticket.approval_status == "Pending", Ticket.project_id.in_(my_project_ids))
+              .filter(
+                  Ticket.approval_status == "Pending",
+                  Ticket.project_id.in_(my_project_ids),
+                  Ticket.is_archived == False
+              )
               .order_by(Ticket.created_at.asc())
         )
 
@@ -1178,10 +1279,10 @@ def dashboard_view():
     st.header("KPI Dashboard")
 
     with get_db() as db:
-        total = db.query(func.count(Ticket.id)).scalar() or 0
-        open_cnt = db.query(func.count(Ticket.id)).filter(Ticket.status.notin_(["Resolved", "Closed"])).scalar() or 0
-        closed_cnt = db.query(func.count(Ticket.id)).filter(Ticket.status.in_(["Resolved", "Closed"])).scalar() or 0
-        awaiting = db.query(func.count(Ticket.id)).filter(Ticket.status == "Awaiting Approval").scalar() or 0
+        total = db.query(func.count(Ticket.id)).filter(Ticket.is_archived == False).scalar() or 0
+        open_cnt = db.query(func.count(Ticket.id)).filter(Ticket.status.notin_(["Resolved", "Closed"]), Ticket.is_archived == False).scalar() or 0
+        closed_cnt = db.query(func.count(Ticket.id)).filter(Ticket.status.in_(["Resolved", "Closed"]), Ticket.is_archived == False).scalar() or 0
+        awaiting = db.query(func.count(Ticket.id)).filter(Ticket.status == "Awaiting Approval", Ticket.is_archived == False).scalar() or 0
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Tickets", total)
@@ -1190,23 +1291,23 @@ def dashboard_view():
         c4.metric("Awaiting Approval", awaiting)
 
         # By status
-        st.markdown("#### Tickets by Status")
+        st.markdown("#### Tickets by Status (excluding archived)")
         data_status = []
         for s in STATUSES:
-            cnt = db.query(func.count(Ticket.id)).filter(Ticket.status == s).scalar() or 0
+            cnt = db.query(func.count(Ticket.id)).filter(Ticket.status == s, Ticket.is_archived == False).scalar() or 0
             data_status.append({"Status": s, "Count": cnt})
         st.bar_chart(pd.DataFrame(data_status).set_index("Status"))
 
         # By priority
-        st.markdown("#### Tickets by Priority")
+        st.markdown("#### Tickets by Priority (excluding archived)")
         data_prio = []
         for p in PRIORITIES:
-            cnt = db.query(func.count(Ticket.id)).filter(Ticket.priority == p).scalar() or 0
+            cnt = db.query(func.count(Ticket.id)).filter(Ticket.priority == p, Ticket.is_archived == False).scalar() or 0
             data_prio.append({"Priority": p, "Count": cnt})
         st.bar_chart(pd.DataFrame(data_prio).set_index("Priority"))
 
         # Trend (last 30 days)
-        st.markdown("#### Opened per Day (last 30 days)")
+        st.markdown("#### Opened per Day (last 30 days, excluding archived)")
         today = dt.datetime.utcnow().date()
         daily = []
         for i in range(29, -1, -1):
@@ -1214,21 +1315,28 @@ def dashboard_view():
             next_day = day + dt.timedelta(days=1)
             cnt = db.query(func.count(Ticket.id)).filter(
                 Ticket.created_at >= dt.datetime.combine(day, dt.time.min),
-                Ticket.created_at < dt.datetime.combine(next_day, dt.time.min)
+                Ticket.created_at < dt.datetime.combine(next_day, dt.time.min),
+                Ticket.is_archived == False
             ).scalar() or 0
             daily.append({"Date": str(day), "Opened": cnt})
         st.line_chart(pd.DataFrame(daily).set_index("Date"))
 
-        # Export
+        st.markdown("#### Export")
+        include_archived = st.checkbox("Include archived tickets in CSV", value=False)
         if st.button("Export all tickets to CSV"):
             rows = []
-            for t in db.query(Ticket).order_by(Ticket.created_at.asc()).all():
+            qexp = db.query(Ticket).order_by(Ticket.created_at.asc())
+            if not include_archived:
+                qexp = qexp.filter(Ticket.is_archived == False)
+            for t in qexp.all():
                 rows.append({
                     "short_id": t.short_id, "title": t.title, "status": t.status, "priority": t.priority,
                     "category": t.category, "project": t.project.name if t.project else "",
-                    "created_by": t.created_by.name, "assigned_to": t.assigned_to.name if t.assigned_to else "",
+                    "created_by": t.created_by.name if t.created_by else "",
+                    "assigned_to": t.assigned_to.name if t.assigned_to else "",
                     "created_at": t.created_at.isoformat(), "updated_at": t.updated_at.isoformat(),
-                    "due_at": t.due_at.isoformat() if t.due_at else ""
+                    "due_at": t.due_at.isoformat() if t.due_at else "",
+                    "is_archived": bool(t.is_archived),
                 })
             buf = io.StringIO()
             pd.DataFrame(rows).to_csv(buf, index=False)
@@ -1257,36 +1365,27 @@ def admin_view():
                 col4.write("✅" if u.is_active else "❌")
                 col5.write(u.created_at.strftime("%m/%d/%y"))
 
-                # Delete button (but not for current user)
+                # Deactivate / Reactivate (no hard delete)
                 current_user_obj = current_user()
-                if u.id != current_user_obj.id:
-                    if col6.button("🗑️", key=f"del_{u.id}", help="Delete user"):
-                        # Confirm deletion
-                        if f"confirm_delete_{u.id}" not in st.session_state:
-                            st.session_state[f"confirm_delete_{u.id}"] = True
-                            st.rerun()
-                else:
+                if u.id == current_user_obj.id:
                     col6.write("(You)")
-
-            # Handle deletion confirmations
-            for u in users:
-                if st.session_state.get(f"confirm_delete_{u.id}", False):
-                    with st.container():
-                        st.warning(f"⚠️ **Delete {u.name}?** This cannot be undone!")
-                        delcol1, delcol2, delcol3 = st.columns(3)
-                        if delcol1.button("✅ Yes, Delete", key=f"confirm_yes_{u.id}", type="primary"):
+                else:
+                    if u.is_active:
+                        if col6.button("Deactivate", key=f"deact_{u.id}", help="Set user inactive"):
                             with get_db() as db_del:
-                                user_to_delete = db_del.query(User).get(u.id)
-                                db_del.delete(user_to_delete)
+                                user_to_deactivate = db_del.query(User).get(u.id)
+                                user_to_deactivate.is_active = False
                                 db_del.commit()
-                            st.success(f"User {u.name} deleted.")
-                            # Clear confirmation state
-                            del st.session_state[f"confirm_delete_{u.id}"]
+                            st.success(f"{u.name} deactivated.")
                             st.rerun()
-                        if delcol2.button("❌ Cancel", key=f"confirm_no_{u.id}"):
-                            del st.session_state[f"confirm_delete_{u.id}"]
+                    else:
+                        if col6.button("Reactivate", key=f"react_{u.id}", help="Set user active"):
+                            with get_db() as db_act:
+                                user_to_activate = db_act.query(User).get(u.id)
+                                user_to_activate.is_active = True
+                                db_act.commit()
+                            st.success(f"{u.name} reactivated.")
                             st.rerun()
-                        st.markdown("---")
 
             st.markdown("#### Add / Update User")
             with st.form("admin_user_form", clear_on_submit=True):
@@ -1374,6 +1473,8 @@ def help_view():
 - **Approvals:** Project Managers see **Approvals** for tickets that requested project charges.
 - **Teams & Email Notifications:** Configure a channel **Incoming Webhook** (`TEAMS_WEBHOOK_URL`) and SMTP (see **Admin → System**).
 - **Security:** Access is restricted to *@{ALLOWED_EMAIL_DOMAIN}* emails. Admins can manage accounts and projects.
+- **Users:** Admins now **Deactivate/Reactivate** users instead of deleting to preserve history.
+- **Archiving:** Admins can **Archive/Unarchive tickets** from the ticket detail page. Archived tickets are read-only and hidden from lists by default.
 """)
 
 # ---------------------------
