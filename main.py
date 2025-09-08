@@ -703,7 +703,7 @@ def ticket_detail_view(ticket_id: int):
         st.markdown("---")
 
         # Tabbed interface
-        tabs = ["Details", "Update Ticket (admin)", "Files", "Comments"]
+        tabs = ["Details", "Update Ticket", "Files", "Comments"]
         if t.request_project_charge and t.project and t.project.manager_id:
             tabs.insert(2, "Approval")
 
