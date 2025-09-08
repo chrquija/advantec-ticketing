@@ -1246,14 +1246,47 @@ def admin_view():
     with tab1:
         st.subheader("Users")
         with get_db() as db:
-            rows = []
-            for u in db.query(User).order_by(User.is_active.desc(), User.name.asc()).all():
-                rows.append({
-                    "name": u.name, "email": u.email, "role": u.role,
-                    "active": "Yes" if u.is_active else "No", "created": u.created_at.strftime("%Y-%m-%d"),
-                    "id": u.id
-                })
-            st.dataframe(pd.DataFrame(rows)[["name", "email", "role", "active", "created"]], use_container_width=True, hide_index=True)
+            users = db.query(User).order_by(User.is_active.desc(), User.name.asc()).all()
+
+            # Display users with action buttons
+            for u in users:
+                col1, col2, col3, col4, col5, col6 = st.columns([3, 2, 1, 1, 1, 1])
+                col1.write(f"**{u.name}**")
+                col2.write(u.email)
+                col3.write(u.role)
+                col4.write("✅" if u.is_active else "❌")
+                col5.write(u.created_at.strftime("%m/%d/%y"))
+
+                # Delete button (but not for current user)
+                current_user_obj = current_user()
+                if u.id != current_user_obj.id:
+                    if col6.button("🗑️", key=f"del_{u.id}", help="Delete user"):
+                        # Confirm deletion
+                        if f"confirm_delete_{u.id}" not in st.session_state:
+                            st.session_state[f"confirm_delete_{u.id}"] = True
+                            st.rerun()
+                else:
+                    col6.write("(You)")
+
+            # Handle deletion confirmations
+            for u in users:
+                if st.session_state.get(f"confirm_delete_{u.id}", False):
+                    with st.container():
+                        st.warning(f"⚠️ **Delete {u.name}?** This cannot be undone!")
+                        delcol1, delcol2, delcol3 = st.columns(3)
+                        if delcol1.button("✅ Yes, Delete", key=f"confirm_yes_{u.id}", type="primary"):
+                            with get_db() as db_del:
+                                user_to_delete = db_del.query(User).get(u.id)
+                                db_del.delete(user_to_delete)
+                                db_del.commit()
+                            st.success(f"User {u.name} deleted.")
+                            # Clear confirmation state
+                            del st.session_state[f"confirm_delete_{u.id}"]
+                            st.rerun()
+                        if delcol2.button("❌ Cancel", key=f"confirm_no_{u.id}"):
+                            del st.session_state[f"confirm_delete_{u.id}"]
+                            st.rerun()
+                        st.markdown("---")
 
             st.markdown("#### Add / Update User")
             with st.form("admin_user_form", clear_on_submit=True):
@@ -1272,7 +1305,9 @@ def admin_view():
                         with get_db() as db2:
                             existing = db2.query(User).filter(func.lower(User.email) == email.lower()).first()
                             if existing:
-                                existing.name = name; existing.role = role; existing.is_active = active
+                                existing.name = name
+                                existing.role = role
+                                existing.is_active = active
                                 if pw:
                                     existing.password_hash = hash_password(pw)
                                 db2.commit()
@@ -1280,10 +1315,11 @@ def admin_view():
                             else:
                                 u = User(name=name, email=email, role=role, is_active=active,
                                          password_hash=hash_password(pw) if pw else None)
-                                db2.add(u); db2.commit()
+                                db2.add(u)
+                                db2.commit()
                                 st.success("User created.")
                         st.rerun()
-                        return
+
     with tab2:
         st.subheader("System Settings")
         st.caption("The app uses environment variables. See `.env.example` for configuration.")
@@ -1293,8 +1329,6 @@ def admin_view():
             "UPLOAD_DIR": UPLOAD_DIR,
             "TEAMS_WEBHOOK_URL": "configured" if TEAMS_WEBHOOK_URL else "(not set)",
             "ALLOW_SELF_SIGNUP": ALLOW_SELF_SIGNUP,
-            "EMAIL_SMTP": "configured" if email_configured() else "(not set)",
-            "APP_BASE_URL": APP_BASE_URL or "(not set)"
         })
         if st.button("Rebuild DB metadata (safe)"):
             Base.metadata.create_all(bind=engine)
