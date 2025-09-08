@@ -9,8 +9,10 @@ from email.message import EmailMessage
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
 from sqlalchemy.orm import sessionmaker
 
-# Import your existing database setup
-from main import Base, engine, utcnow, valid_org_email, hash_password
+# Import shared database setup (CHANGED: was "from main import...")
+from database import Base, engine, utcnow, valid_org_email, hash_password
+
+# ... rest of your existing code stays exactly the same ...
 
 # ---------------------------
 # 2FA CONFIGURATION

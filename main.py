@@ -17,7 +17,7 @@ load_dotenv()
 # --- standard libs ---
 import io
 import re
-import hashlib
+import hashlib #veirfiy_password function
 import requests
 import datetime as dt
 from typing import Optional, Tuple, List
@@ -28,12 +28,15 @@ from email.message import EmailMessage
 
 import pandas as pd
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, DateTime, Boolean,
+    Column, Integer, String, Text, DateTime, Boolean,
     ForeignKey, func, or_
 )
 from sqlalchemy.orm import (
-    declarative_base, relationship, sessionmaker, scoped_session, joinedload
+    relationship, sessionmaker, scoped_session, joinedload
 )
+
+# Import shared database components
+from database import Base, engine, SessionLocal, utcnow, hash_password, valid_org_email, ALLOWED_EMAIL_DOMAIN
 
 # Import 2FA functionality
 try:
@@ -53,8 +56,7 @@ except ImportError:
 APP_NAME = "ATIX"
 ORG_NAME = "ADVANTEC"
 
-ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "advantec-usa.com")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///atix.db")
+# Keep these - they're NOT duplicated in database.py
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL", "")  # optional (channel Incoming Webhook)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", f"admin@{ALLOWED_EMAIL_DOMAIN}")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
@@ -85,17 +87,6 @@ PRIORITIES = [
 ]
 
 CATEGORIES = ["Civil Engineering", "Data Engineering", "Operations", "Admin/HR", "Other"]
-
-# ---------------------------
-# 1) DB SETUP (SQLAlchemy)
-# ---------------------------
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
-SessionLocal = scoped_session(sessionmaker(bind=engine, autocommit=False, autoflush=False))
-Base = declarative_base()
-
-def utcnow():
-    return dt.datetime.utcnow()
 
 # ---------------------------
 # 2) MODELS
@@ -200,11 +191,6 @@ def ensure_dirs():
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-def hash_password(pw: str) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, 120000)
-    return salt.hex() + ":" + digest.hex()
-
 def verify_password(pw: str, stored: str) -> bool:
     try:
         salt_hex, hash_hex = stored.split(":", 1)
@@ -213,13 +199,6 @@ def verify_password(pw: str, stored: str) -> bool:
         return digest.hex() == hash_hex
     except Exception:
         return False
-
-def valid_org_email(email: str) -> bool:
-    try:
-        domain = email.split("@", 1)[1].lower()
-    except Exception:
-        return False
-    return domain == ALLOWED_EMAIL_DOMAIN.lower()
 
 def generate_short_id(db) -> str:
     year = dt.datetime.utcnow().year
@@ -1372,6 +1351,7 @@ def admin_view():
     with tab2:
         st.subheader("System Settings")
         st.caption("The app uses environment variables. See `.env.example` for configuration.")
+        from database import DATABASE_URL
         st.write({
             "DATABASE_URL": DATABASE_URL,
             "ALLOWED_EMAIL_DOMAIN": ALLOWED_EMAIL_DOMAIN,
