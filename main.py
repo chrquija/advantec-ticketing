@@ -46,12 +46,16 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///atix.db")
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL", "")  # optional (channel Incoming Webhook)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", f"admin@{ALLOWED_EMAIL_DOMAIN}")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
-ALLOW_SELF_SIGNUP = os.getenv("ALLOW_SELF_SIGNUP", "0") == "1"
+# Enable self-signup by default so coworkers can create accounts immediately
+ALLOW_SELF_SIGNUP = os.getenv("ALLOW_SELF_SIGNUP", "1") == "1"
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 
 # statuses + priorities
 STATUSES = ["New", "In Progress", "Awaiting Approval", "Approved", "Rejected", "On Hold", "Resolved", "Closed"]
-PRIORITIES = ["Low", "Medium", "High", "Urgent"]
+
+# New priority scheme
+PRIORITIES = ["P1 - Urgent", "P2 - High", "P3 - Normal"]
+
 CATEGORIES = ["IT", "Data", "Operations", "Finance", "HR", "Facilities", "Security", "Other"]
 
 # ---------------------------
@@ -98,7 +102,7 @@ class Ticket(Base):
     description = Column(Text, nullable=False)
 
     status = Column(String(50), default="New")
-    priority = Column(String(20), default="Medium")
+    priority = Column(String(20), default="P3 - Normal")
     category = Column(String(100), default="Other")
 
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -218,13 +222,33 @@ def add_history(db, ticket_id: int, actor_id: int, action: str, from_status: Opt
     db.commit()
 
 # ---------------------------
-# 4) DB INIT + SEED
+# 4) DB INIT + SEED (+ priority migration)
 # ---------------------------
+def migrate_priorities(db):
+    """Map any legacy priorities to the new P1/P2/P3 scheme."""
+    legacy_to_new = {
+        "Urgent": "P1 - Urgent",
+        "High": "P2 - High",
+        "Medium": "P3 - Normal",
+        "Low": "P3 - Normal",
+    }
+    updated = 0
+    for legacy, newv in legacy_to_new.items():
+        updated += db.query(Ticket).filter(Ticket.priority == legacy).update(
+            {Ticket.priority: newv},
+            synchronize_session=False
+        )
+    if updated:
+        db.commit()
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     ensure_dirs()
     db = SessionLocal()
     try:
+        # One-time migration in case there are old records
+        migrate_priorities(db)
+
         admin = db.query(User).filter_by(email=ADMIN_EMAIL).first()
         if not admin:
             admin = User(
@@ -246,11 +270,8 @@ def init_db():
 init_db()
 
 # ---------------------------
-# 5) INTRO (YOUR EXACT TEXT)
+# 5) INTRO
 # ---------------------------
-
-
-# ---- Your exact introduction block ----
 st.title("ATIX")
 st.subheader("Enterprise Ticketing Solution from ADVANTEC")
 
@@ -319,12 +340,15 @@ def login_view():
                     st.sidebar.error("Invalid credentials.")
                 else:
                     set_current_user(u)
-                    st.experimental_rerun()
+                    st.rerun()
+                    return
 
     if ALLOW_SELF_SIGNUP:
         st.sidebar.caption("No account?")
         if st.sidebar.button("Create an account"):
             st.session_state["show_signup"] = True
+            st.rerun()
+            return
 
     if st.session_state.get("show_signup", False):
         signup_view()
@@ -353,13 +377,16 @@ def signup_view():
                         db.add(u); db.commit()
                         st.sidebar.success("Account created. Please sign in.")
                         st.session_state["show_signup"] = False
+                        st.rerun()
+                        return
 
 def logout_button():
     user = current_user()
     if user:
         if st.sidebar.button("Sign out"):
             set_current_user(None)
-            st.experimental_rerun()
+            st.rerun()
+            return
 
 # ---------------------------
 # 8) SIDEBAR NAV
@@ -433,11 +460,13 @@ def create_ticket_view():
         desc = st.text_area("Description", height=200, placeholder="Describe the request or issue in detail…")
         col1, col2, col3 = st.columns(3)
         with col1:
+            # default to P2
             priority = st.selectbox("Priority", PRIORITIES, index=1)
         with col2:
             category = st.selectbox("Category", CATEGORIES, index=CATEGORIES.index("Other"))
         with col3:
-            due_at = st.date_input("Due date (optional)", value=None)
+            # Some Streamlit versions don't like None; you can set a date and clear later if needed
+            due_at = st.date_input("Due date (optional)")
         col4, col5 = st.columns(2)
         with col4:
             project_choice = st.selectbox("Project (optional)", proj_options, index=0)
@@ -472,7 +501,7 @@ def create_ticket_view():
                     project_id=project_id,
                     request_project_charge=bool(request_charge),
                     approval_status="Pending" if request_charge else "Not Requested",
-                    due_at=dt.datetime.combine(due_at, dt.time(17, 0)) if due_at else None
+                    due_at=dt.datetime.combine(due_at, dt.time(17, 0)) if isinstance(due_at, dt.date) else None
                 )
                 db.add(t); db.commit()
 
@@ -704,7 +733,7 @@ def ticket_detail_view(ticket_id: int):
 
             colu5, colu6 = st.columns(2)
             with colu5:
-                due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else None)
+                due = st.date_input("Due Date", value=t.due_at.date() if t.due_at else dt.date.today())
             with colu6:
                 due_time = st.time_input("Due Time", value=t.due_at.time() if t.due_at else dt.time(17, 0))
 
@@ -733,10 +762,7 @@ def ticket_detail_view(ticket_id: int):
                         chosen = next((p for p in projects if p.name == project_choice), None)
                         t.project_id = chosen.id if chosen else t.project_id
                     # due
-                    if due:
-                        t.due_at = dt.datetime.combine(due, due_time)
-                    else:
-                        t.due_at = None
+                    t.due_at = dt.datetime.combine(due, due_time) if isinstance(due, dt.date) else None
                     t.updated_at = utcnow()
                     t.last_activity_at = utcnow()
                     db.commit()
@@ -774,7 +800,8 @@ def ticket_detail_view(ticket_id: int):
                         f"Approval note: {note or '(none)'}"
                     )
                     st.success(f"Ticket {ap}.")
-                    st.experimental_rerun()
+                    st.rerun()
+                    return
 
         # Attachments
         st.markdown("### Attachments")
@@ -797,7 +824,6 @@ def ticket_detail_view(ticket_id: int):
             ensure_dirs()
             ticket_dir = os.path.join(UPLOAD_DIR, t.short_id)
             os.makedirs(ticket_dir, exist_ok=True)
-            saved = 0
             for f in upfiles:
                 safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
                 path = os.path.join(ticket_dir, safe_name)
@@ -814,7 +840,8 @@ def ticket_detail_view(ticket_id: int):
                     db3.commit()
             add_history(db, t.id, user.id, "attachments", note=f"{len(upfiles)} new attachment(s)")
             st.success("Attachment(s) saved.")
-            st.experimental_rerun()
+            st.rerun()
+            return
 
         # Comments
         st.markdown("### Comments")
@@ -841,7 +868,8 @@ def ticket_detail_view(ticket_id: int):
                     add_history(db, t.id, user.id, "comment", note="internal" if internal else "comment")
                     send_teams_notification(f"New comment on {t.short_id}", f"By: {user.name}\n{body[:400]}")
                     st.success("Comment posted.")
-                    st.experimental_rerun()
+                    st.rerun()
+                    return
 
 # ---------------------------
 # 12) APPROVALS PAGE
@@ -931,7 +959,8 @@ def projects_view():
                         p = Project(name=name, code=code or None, description=desc or None, manager_id=pm.id if pm else None)
                         db.add(p); db.commit()
                         st.success("Project created.")
-                        st.experimental_rerun()
+                        st.rerun()
+                        return
 
 # ---------------------------
 # 14) DASHBOARD
@@ -1044,7 +1073,8 @@ def admin_view():
                                      password_hash=hash_password(pw) if pw else None)
                             db.add(u); db.commit()
                             st.success("User created.")
-                        st.experimental_rerun()
+                        st.rerun()
+                        return
     with tab2:
         st.subheader("System Settings")
         st.caption("The app uses environment variables. See `.env.example` for configuration.")
