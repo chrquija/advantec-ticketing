@@ -1,15 +1,20 @@
 import os
+import streamlit as st  # import Streamlit first
 
-# 🔑 New block — supports Streamlit Cloud secrets
+# Must be the first Streamlit call:
+st.set_page_config(page_title="ATIX", page_icon="🎫", layout="wide")
+
+# (Optional) Map Streamlit Cloud secrets into env; safe locally too
 try:
-    import streamlit as st
-    os.environ.update({k: str(v) for k, v in st.secrets.items()})
+    if hasattr(st, "secrets") and len(getattr(st, "secrets", {})) > 0:
+        os.environ.update({k: str(v) for k, v in st.secrets.items()})
 except Exception:
     pass
 
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- your other imports can follow ---
 import io
 import re
 import uuid
@@ -23,12 +28,12 @@ import datetime as dt
 from typing import Optional, Tuple, List
 
 import pandas as pd
-
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
     ForeignKey, func
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, scoped_session
+
 
 # ---------------------------
 # 0) ENV + GLOBALS
@@ -36,7 +41,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, scoped_
 APP_NAME = "ATIX"
 ORG_NAME = "ADVANTEC"
 
-ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "advantec.com")
+ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "advantec-usa.com")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///atix.db")
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL", "")  # optional (channel Incoming Webhook)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", f"admin@{ALLOWED_EMAIL_DOMAIN}")
@@ -241,9 +246,9 @@ def init_db():
 init_db()
 
 # ---------------------------
-# 5) STREAMLIT PAGE CONFIG + INTRO (YOUR EXACT TEXT)
+# 5) INTRO (YOUR EXACT TEXT)
 # ---------------------------
-st.set_page_config(page_title="ATIX", page_icon="🎫", layout="wide")
+
 
 # ---- Your exact introduction block ----
 st.title("ATIX")
